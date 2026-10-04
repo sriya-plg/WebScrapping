@@ -1,0 +1,27 @@
+# Forward Air -- open-tier site, no bot protection observed.
+# Selectors marked TODO need confirming against the live DOM.
+
+name: forward_air
+tracking_url: "https://www.forwardair.com/tracking"
+api_url_substring: "tracking/shipments"
+
+wait_until: "domcontentloaded"
+bot_protected: false
+
+selectors:
+  reference_input: 'input[placeholder*="tracking" i], input[name*="number" i]'  # TODO: confirm
+  submit_button: 'button:has-text("Track"), button[type="submit"]'              # TODO: confirm
+
+supported_reference_types:
+  - reference_number
+
+login:
+  required: false
+  username_input: 'input[name="username"]'   # TODO: confirm if login is actually required
+  password_input: 'input[name="password"]'   # TODO: confirm
+  submit_button: 'button[type="submit"]'      # TODO: confirm
+
+reference_type_field:
+  selector: ''            # TODO: confirm
+  options:
+    reference_number: ''   # TODO

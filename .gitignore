@@ -1,0 +1,38 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+
+# Virtual environments
+.venv/
+
+
+# Environment and local configuration
+.env
+
+
+# Build and packaging artifacts
+build/
+*.egg-info/
+.eggs/
+*.egg
+
+# Test coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Application-generated files
+app/logs/
+
+# Editors and operating systems
+.vscode/
+
+
+logs/

@@ -1,0 +1,37 @@
+# Saia -- bot-protected (Cloudflare bot-check cookie + CSRF token +
+# client-side encrypted PRO parameter). We never replicate the encryption
+# ourselves -- letting a real, stealth-patched browser run Saia's own JS
+# is the entire point of the browser-automation approach for this carrier.
+# Selectors marked TODO need confirming against the live DOM.
+
+name: saia
+tracking_url: "https://www.saia.com/track"
+api_url_substring: "find-by-pro-number"
+
+# networkidle, not domcontentloaded -- give Cloudflare's JS challenge
+# time to resolve before we touch the form.
+wait_until: "networkidle"
+bot_protected: true
+
+selectors:
+  reference_input: 'textarea#trackingNumbers'
+  submit_button: 'button.track-button'
+
+supported_reference_types:
+  - pro
+
+# Saia's tracking search itself did NOT require login in our testing
+# (the encrypted-param call worked from the public /track page) -- but
+# a "Saia Secure" account login exists for their portal generally. Set
+# required: true only if the backend's jobs need authenticated data
+# (e.g. rate/account-specific details) beyond public tracking.
+login:
+  required: false
+  username_input: 'input[name="username"]'   # TODO: confirm
+  password_input: 'input[name="password"]'   # TODO: confirm
+  submit_button: 'button[type="submit"]'      # TODO: confirm
+
+reference_type_field:
+  selector: ''            # TODO: confirm
+  options:
+    pro: ''                 # TODO

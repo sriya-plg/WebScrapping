@@ -1,0 +1,29 @@
+[
+  {
+    "bill_to_customer_code": "2629916",
+    "carrier": "estes",
+    "url": "https://www.estes-express.com/myestes/shipment-tracking/",
+    "username": "REPLACE_ME",
+    "password": "REPLACE_ME",
+    "reference_type": "PRO Number",
+    "reference_number": "1848665720"
+  },
+  {
+    "bill_to_customer_code": "2629916",
+    "carrier": "forward_air",
+    "url": "https://www.forwardair.com/tracking",
+    "username": "REPLACE_ME",
+    "password": "REPLACE_ME",
+    "reference_type": "reference_number",
+    "reference_number": "23645286"
+  },
+  {
+    "bill_to_customer_code": "2629916",
+    "carrier": "saia",
+    "url": "https://www.saia.com/track",
+    "username": "REPLACE_ME",
+    "password": "REPLACE_ME",
+    "reference_type": "pro",
+    "reference_number": "77133675090"
+  }
+]

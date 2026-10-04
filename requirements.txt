@@ -1,0 +1,13 @@
+# Browser automation
+playwright==1.47.0
+playwright-stealth==2.0.3
+
+# Config loading
+PyYAML==6.0.2
+python-dotenv==1.0.1
+
+# Structured logging
+python-json-logger==2.0.7
+
+# Scheduling with jitter
+apscheduler==3.10.4

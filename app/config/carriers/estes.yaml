@@ -1,0 +1,49 @@
+# Estes Express -- open-tier site, no bot protection observed.
+# Selectors marked TODO need confirming against the live DOM.
+
+name: estes
+tracking_url: "https://www.estes-express.com/myestes/shipment-tracking/"
+# The public tracking application's data request. The form also emits an
+# unrelated /clm10 acknowledgement, which contains no tracking data.
+api_url_substring: "myestes-api.estes-express.com/shipmenttracking/history"
+api_url_template: "https://myestes-api.estes-express.com/shipmenttracking/history?pro={reference}"
+
+# This page keeps loading third-party resources after its search form is ready.
+# Waiting for the initial document commit lets Playwright locate the form
+# without failing on a delayed DOMContentLoaded event.
+wait_until: "commit"
+
+# does this site actively try to detect/block automation? if true, the
+# base scraper runs extra block-marker checks and waits for full network
+# idle (letting any JS challenge resolve) before touching the form.
+bot_protected: false
+
+cookie_consent:
+  accept_selector: '[data-tid="banner-accept"]'
+
+selectors:
+  # Estes defaults its "Search by" dropdown to PRO Number. The tracking
+  # number itself belongs in this multi-line field, one number per line.
+  reference_input: '#criteria'
+  submit_button: 'button:has-text("SEARCH")'
+
+# which reference types this carrier's config currently supports.
+# extend as BOL/PO lookups get confirmed.
+supported_reference_types:
+  - pro
+
+# Login is site-dependent -- set required: true if the backend's job
+# payload includes credentials for this carrier and the tracking page
+# needs a login before search works. Leave false if it stays open.
+login:
+  required: false
+  username_input: 'input[name="username"]'   # TODO: confirm if login is actually required
+  password_input: 'input[name="password"]'   # TODO: confirm
+  submit_button: 'button[type="submit"]'      # TODO: confirm
+
+# PRO Number is the page's default search mode. No dropdown interaction is
+# needed for the currently supported `pro` reference type.
+reference_type_field:
+  selector: ''
+  options:
+    pro: ''
