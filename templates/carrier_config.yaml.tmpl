@@ -1,0 +1,14 @@
+# __CLIENT__ x __NAME__ -- site mechanics + normalization. Shared client settings are in ../../client.yaml
+name: __NAME__
+aliases: []
+browser: {provider: playwright_stealth, headless: true}
+limits: {max_concurrency: 1, min_delay_s: 4, max_delay_s: 11}
+adapter:
+  tracking_page: https://TODO
+  input_selector: "TODO"
+  submit_selector: "TODO"
+  response_regex: "TODO"
+normalize:
+  fields: {status: "TODO", delivery_date: "TODO"}
+  status_map: {}
+  events: {path: TODO, fields: {timestamp: TODO, description: TODO, location: TODO}}

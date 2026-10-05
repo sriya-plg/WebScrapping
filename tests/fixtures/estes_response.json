@@ -1,0 +1,4 @@
+{"shipment": {"status": "Delivered", "pickupDate": "2026-09-28", "deliveryDate": "2026-10-01",
+  "origin": "Atlanta, GA", "destination": "Dallas, TX", "pieces": "4", "weight": "1,250 lbs"},
+ "history": [{"date": "2026-10-01T09:12:00", "description": "Delivered", "location": "Dallas, TX", "status": "Delivered"},
+             {"date": "2026-09-30T05:00:00", "description": "Out for delivery", "location": "Dallas, TX", "status": "Out for delivery"}]}

@@ -1,0 +1,4 @@
+{"data": [
+ {"id": 1, "carrierName": "Estes Express", "carrierCode": "ESTES", "trackingUrl": "https://www.estes-express.com/myestes/shipment-tracking/", "billTo": "CALIX", "customerName": "Calix", "processingFrequency": 6, "processingDelay": 0, "userName": null, "password": null, "isActive": true, "totalCount": 2},
+ {"id": 2, "carrierName": "Saia", "carrierCode": "SAIA", "trackingUrl": "https://www.saia.com/track", "billTo": "CALIX", "customerName": "Calix", "processingFrequency": 6, "userName": "u", "password": "p@ss", "isActive": false, "totalCount": 0}
+]}

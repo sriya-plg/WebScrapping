@@ -1,0 +1,14 @@
+log_level: INFO
+state_db: state/tracker.db
+state_dir: state/browser
+clients_dir: app/clients
+schedule: {interval_minutes: 360, jitter_minutes: 25, seed: tracker}
+alerts: {webhook_url: null, dedupe_hours: 6}   # Teams/Slack incoming webhook
+backend:
+  mode: file            # switch to http once the API is live
+  base_url: https://backend.example.com/api
+  token_env: TRACKER_API_TOKEN
+  carriers_path: /carriers
+  post_path: /tracking/bulk
+  stub_dir: stub
+  outbox_dir: out

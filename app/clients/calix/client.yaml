@@ -1,0 +1,24 @@
+# Everything shared by ALL Calix carriers. A carrier's own config.yaml overrides/extends this.
+name: Calix
+bill_to: [CALIX]                 # backend billTo codes handled by this folder
+defaults:
+  pending:                       # Calix's "pending housebills" API (same shape for every carrier here)
+    endpoint: /calix/housebills/pending?carrier={carrier_code}
+    items_path: data
+    ref_field: proNumber
+    search_by_path: searchBy     # first response tells us PRO / BOL / ...
+    search_by_default: PRO
+  payload_map:                   # keys Calix's backend expects (VERIFY names)
+    billTo: ctx.bill_to
+    carrierCode: ctx.carrier_code
+    housebill: ctx.housebill
+    proNumber: reference
+    referenceType: ref_type
+    status: status
+    delivered: delivered
+    deliveryDate: delivery_date
+    eta: eta
+    events: events
+    scrapedAt: scraped_at
+    source: "=web-scrape"
+  limits: {retries: 3}
