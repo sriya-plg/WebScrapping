@@ -38,3 +38,4 @@ app/logs/
 logs/
 
 .playwright-mcp/
+state/
