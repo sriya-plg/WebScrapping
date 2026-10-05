@@ -77,6 +77,7 @@ class TrackingResult(BaseModel):
     events: list[TrackingEvent] = []
     scraped_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     raw: dict[str, Any] = {}
+    notes: list[str] = []      # what was auto-detected / inferred (visible in probe + logs, not in payload)
 
     @field_validator("weight", mode="before")
     @classmethod

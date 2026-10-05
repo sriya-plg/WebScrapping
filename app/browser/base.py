@@ -24,13 +24,19 @@ class BrowserSession(ABC):
     @abstractmethod
     async def click(self, selector: str) -> None: ...
     @abstractmethod
+    async def press(self, selector: str, key: str) -> None: ...
+    @abstractmethod
     async def select_option(self, selector: str, value: str) -> None: ...
     @abstractmethod
     async def wait_for_selector(self, selector: str, timeout_s: float = 20) -> bool: ...
     @abstractmethod
-    async def capture_json(self, url_regex: str, action: Callable[[], Awaitable[Any]],
-                           timeout_s: float = 30) -> list[CapturedResponse]:
-        """Run `action` (a click/navigation) and return JSON responses the browser received whose URL matches."""
+    async def discover_search_box(self) -> dict | None:
+        """Best-guess {"input": css, "submit": css|None} for the page's main search/tracking box."""
+    @abstractmethod
+    async def capture_all(self, action: Callable[[], Awaitable[Any]], timeout_s: float = 30, settle_s: float = 1.0,
+                          until: Callable[[list[CapturedResponse]], bool] | None = None) -> list[CapturedResponse]:
+        """Run `action`; return every JSON response the browser received meanwhile. Stops early once
+        `until(responses)` is true (then waits `settle_s`), else after `settle_s` of silence, else at timeout."""
     @abstractmethod
     async def looks_blocked(self, markers: list[str] | None = None) -> bool: ...
     @abstractmethod
@@ -42,6 +48,6 @@ class BrowserSession(ABC):
 class BrowserProvider(ABC):
     @abstractmethod
     async def open_session(self, key: str) -> BrowserSession:
-        """`key` = stable id (carrier[:account]) used to persist/reuse cookies between runs."""
+        """`key` = stable id (client_carrier) used to persist/reuse cookies between runs."""
     @abstractmethod
     async def close(self) -> None: ...

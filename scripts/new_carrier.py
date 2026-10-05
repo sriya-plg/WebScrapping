@@ -1,14 +1,22 @@
-"""python scripts/new_carrier.py calix forwardair "Forward Air" -> app/clients/calix/carriers/forwardair/{config.yaml,adapter.py,hooks.py}"""
+"""python scripts/new_carrier.py calix forwardair [--adapter]  ->  carriers/forwardair/mapping.yaml (+ adapter.py)"""
 import pathlib, sys
-client, folder, name = sys.argv[1].lower(), sys.argv[2].lower(), sys.argv[3] if len(sys.argv) > 3 else sys.argv[2]
-root = pathlib.Path(__file__).resolve().parents[1]
-d = root / "app/clients" / client / "carriers" / folder
+client, folder = sys.argv[1].lower(), sys.argv[2].lower()
+d = pathlib.Path(__file__).resolve().parents[1] / "app/clients" / client / "carriers" / folder
 d.mkdir(parents=True, exist_ok=True)
 (d / "__init__.py").touch()
-sub = {"__CLIENT__": client.title(), "__NAME__": name, "__CLS__": name.replace(" ", "").replace("_", "")}
-def fill(t):
-    for k, v in sub.items(): t = t.replace(k, v)
-    return t
-for out, tmpl in (("config.yaml", "carrier_config.yaml.tmpl"), ("adapter.py", "adapter.py.tmpl"), ("hooks.py", "hooks.py.tmpl")):
-    (d / out).write_text(fill((root / "templates" / tmpl).read_text()))
-print(f"created {d} -- fill the TODOs in config.yaml; nothing else to touch")
+(d / "mapping.yaml").write_text(f"""# {client} x {folder}. All optional -- probe first: python scripts/probe.py {client} {folder} <ref>
+aliases: []
+# fields: {{status: "shipment.status"}}      # pin verified raw-JSON paths
+# status_map: {{}}                           # only for statuses the built-in rules don't understand
+# site: {{}}                                 # input_selector / submit_selector / response_regex / transport ...
+""")
+if "--adapter" in sys.argv:
+    (d / "adapter.py").write_text('''"""Custom behaviour for this carrier ONLY. Override the smallest hook you need."""
+from app.core.adapter import GenericAdapter
+
+
+class CustomAdapter(GenericAdapter):
+    async def _on_landing(self) -> None:       # e.g. dismiss a banner, clear a challenge, log in
+        await super()._on_landing()
+''')
+print(f"created {d}" + ("" if "--adapter" in sys.argv else "  (no adapter needed unless the site is unusual)"))

@@ -1,6 +1,7 @@
-"""SQLite state: idempotency keys, last-run times, manual-intervention queue, kv."""
+"""SQLite state: idempotency keys, last-run times, intervention queue, small kv cache."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -15,7 +16,7 @@ class StateStore:
         CREATE TABLE IF NOT EXISTS sent(key TEXT PRIMARY KEY, ts REAL);
         CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
         CREATE TABLE IF NOT EXISTS intervention(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, run_id TEXT, carrier TEXT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, run_id TEXT, client TEXT, carrier TEXT,
             bill_to TEXT, reference TEXT, reason TEXT, resolved INTEGER DEFAULT 0);
         """)
 
@@ -34,16 +35,42 @@ class StateStore:
         self.db.execute("INSERT OR REPLACE INTO kv VALUES(?,?)", (k, v))
         self.db.commit()
 
-    def enqueue(self, run_id, carrier, bill_to, refs: list[str], reason: str) -> None:
-        self.db.executemany(
-            "INSERT INTO intervention(ts,run_id,carrier,bill_to,reference,reason) VALUES(?,?,?,?,?,?)",
-            [(time.time(), run_id, carrier, bill_to, r, reason) for r in refs])
+    def kv_delete(self, k: str) -> None:
+        self.db.execute("DELETE FROM kv WHERE k=?", (k,))
         self.db.commit()
+
+    def enqueue(self, run_id, client, carrier, bill_to, refs: list[str], reason: str) -> int:
+        """Adds only refs not already waiting with the same reason (no duplicate rows run after run)."""
+        new = [r for r in refs if not self.db.execute(
+            "SELECT 1 FROM intervention WHERE resolved=0 AND client=? AND carrier=? AND bill_to=? AND reference=? AND reason=?",
+            (client, carrier, bill_to, r, reason)).fetchone()]
+        self.db.executemany(
+            "INSERT INTO intervention(ts,run_id,client,carrier,bill_to,reference,reason) VALUES(?,?,?,?,?,?,?)",
+            [(time.time(), run_id, client, carrier, bill_to, r, reason) for r in new])
+        self.db.commit()
+        return len(new)
 
     def open_interventions(self) -> list[tuple]:
         return self.db.execute(
-            "SELECT carrier,bill_to,reference,reason,ts FROM intervention WHERE resolved=0").fetchall()
+            "SELECT client,carrier,bill_to,reference,reason,ts FROM intervention WHERE resolved=0").fetchall()
 
-    def resolve_interventions(self, carrier: str) -> None:
-        self.db.execute("UPDATE intervention SET resolved=1 WHERE carrier=?", (carrier,))
+    def resolve_interventions(self, client: str, carrier: str) -> None:
+        self.db.execute("UPDATE intervention SET resolved=1 WHERE client=? AND carrier=?", (client, carrier))
         self.db.commit()
+
+
+class KVCache:
+    """Tiny per-client+carrier cache handed to adapters (so they never touch the store directly)."""
+
+    def __init__(self, store: StateStore, client: str, code: str):
+        self._s, self._p = store, f"cache:{client}:{code}:"
+
+    def get(self, name: str) -> dict | None:
+        v = self._s.kv_get(self._p + name)
+        return json.loads(v) if v else None
+
+    def set(self, name: str, value: dict) -> None:
+        self._s.kv_set(self._p + name, json.dumps(value))
+
+    def delete(self, name: str) -> None:
+        self._s.kv_delete(self._p + name)

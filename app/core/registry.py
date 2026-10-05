@@ -1,5 +1,5 @@
-"""Adapter registry. Discovery is by FOLDER: app/clients/<client>/carriers/<carrier>/adapter.py -- the
-CarrierAdapter subclass defined there is registered for (client, CARRIER). No decorators needed."""
+"""Adapter registry. Most carriers need NO adapter: they use GenericAdapter. A carrier folder may contain an
+adapter.py whose CarrierAdapter subclass is auto-registered for (client, carrier) by its FOLDER location."""
 from __future__ import annotations
 
 import importlib
@@ -17,21 +17,28 @@ def register(*codes: str, client: str | None = None):
     return deco
 
 
-def discover() -> None:
+def discover() -> list[str]:
+    """Import every app/clients/<client>/carriers/<carrier>/adapter.py. A broken adapter is reported, not fatal."""
     import app.clients as pkg
     from app.core.adapter import CarrierAdapter
+    errors = []
     for m in pkgutil.walk_packages(pkg.__path__, "app.clients."):
         parts = m.name.split(".")          # app clients <client> carriers <carrier> adapter
         if len(parts) == 6 and parts[3] == "carriers" and parts[5] == "adapter":
-            mod = importlib.import_module(m.name)
+            try:
+                mod = importlib.import_module(m.name)
+            except Exception as e:
+                errors.append(f"{m.name}: {e}")
+                continue
             for obj in vars(mod).values():
-                if isinstance(obj, type) and issubclass(obj, CarrierAdapter) and obj is not CarrierAdapter \
-                        and obj.__module__ == m.name:
+                if isinstance(obj, type) and issubclass(obj, CarrierAdapter) and obj.__module__ == m.name:
                     _REG[(parts[2].upper(), parts[4].upper())] = obj
+    return errors
 
 
 def get_adapter_class(code: str, client: str | None = None) -> type:
     for k in ((client.upper() if client else None, code.upper()), (None, code.upper())):
         if k in _REG:
             return _REG[k]
-    raise KeyError(f"no adapter for client={client!r} carrier={code!r}; known: {sorted(_REG, key=str)}")
+    from app.core.adapter import GenericAdapter
+    return GenericAdapter

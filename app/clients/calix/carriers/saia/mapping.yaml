@@ -1,0 +1,13 @@
+# Calix x Saia. Needs adapter.py only for Cloudflare handling; mapping works like any other carrier.
+aliases: [SAIA_LTL]
+browser:
+  provider: patchright         # undetected-first; fall back to crawl4ai only if this gets blocked
+  headless: false              # run under xvfb on a server; headed passes Cloudflare far more often
+  channel: chrome
+limits: {max_concurrency: 1, min_delay_s: 8, max_delay_s: 20, retries: 2, breaker_threshold: 3, breaker_cooldown_s: 3600}
+block_markers: ["just a moment", "verify you are human", "attention required"]
+site:
+  challenge_wait_s: 60
+  # extra:
+  #   login: {url: "https://TODO", user_selector: "TODO", pass_selector: "TODO", submit_selector: "TODO", logged_in_selector: "TODO"}
+# fields: {status: "TODO"}

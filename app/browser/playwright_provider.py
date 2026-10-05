@@ -6,6 +6,7 @@ import asyncio
 import os
 import random
 import re
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -25,6 +26,44 @@ async def _apply_stealth(context) -> None:
         context.on("page", lambda p: asyncio.create_task(stealth_async(p)))
     except ImportError:
         pass
+
+
+_DISCOVER_JS = r"""() => {
+  const vis = el => { const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+                      return r.width > 20 && r.height > 10 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  const kw = /(\bpro\b|bol|track|search|number|reference|shipment|waybill|housebill|bill of lading)/i;
+  const css = el => {
+    if (el.id) return '#' + CSS.escape(el.id);
+    for (const a of ['name', 'data-testid', 'data-test', 'aria-label', 'placeholder']) {
+      const v = el.getAttribute(a);
+      if (v) { const sel = el.tagName.toLowerCase() + '[' + a + '="' + v.replace(/"/g, '\\"') + '"]';
+               if (document.querySelectorAll(sel).length === 1) return sel; }
+    }
+    const path = []; let n = el;
+    while (n && n.nodeType === 1 && path.length < 6) {
+      let i = 1, s = n; while ((s = s.previousElementSibling)) if (s.tagName === n.tagName) i++;
+      path.unshift(n.tagName.toLowerCase() + ':nth-of-type(' + i + ')'); n = n.parentElement; }
+    return path.join('>');
+  };
+  const bad = ['hidden', 'checkbox', 'radio', 'submit', 'button', 'password', 'file', 'email'];
+  const inputs = [...document.querySelectorAll('input,textarea')]
+      .filter(el => !bad.includes((el.type || 'text').toLowerCase()) && vis(el) && !el.disabled);
+  let best = null, score = -1e9;
+  for (const el of inputs) {
+    const txt = [el.name, el.id, el.placeholder, el.getAttribute('aria-label'),
+                 el.labels && el.labels[0] && el.labels[0].innerText].join(' ');
+    let sc = kw.test(txt) ? 5 : 0;
+    if (el.closest('form')) sc += 1;
+    if (el.type === 'search') sc += 1;
+    sc -= el.getBoundingClientRect().top / 5000;
+    if (sc > score) { score = sc; best = el; }
+  }
+  if (!best) return null;
+  const scope = best.closest('form') || document;
+  const btns = [...scope.querySelectorAll('button,input[type=submit],[role=button]')].filter(vis);
+  const sb = btns.find(b => /track|search|submit|go|find/i.test(b.innerText || b.value || b.getAttribute('aria-label') || '')) || btns[0] || null;
+  return {input: css(best), submit: sb ? css(sb) : null};
+}"""
 
 
 class _PWSession(BrowserSession):
@@ -48,6 +87,10 @@ class _PWSession(BrowserSession):
         await asyncio.sleep(random.uniform(0.3, 0.9))
         await self.page.click(selector)
 
+    async def press(self, selector, key):
+        await asyncio.sleep(random.uniform(0.3, 0.9))
+        await self.page.press(selector, key)
+
     async def select_option(self, selector, value):
         await self.page.select_option(selector, value)
 
@@ -58,34 +101,129 @@ class _PWSession(BrowserSession):
         except Exception:
             return False
 
-    async def capture_json(self, url_regex, action: Callable[[], Awaitable[Any]], timeout_s=30):
-        rx, found, tasks, done = re.compile(url_regex), [], [], asyncio.Event()
+    async def discover_search_box(self):
+        try:
+            return await self.page.evaluate(_DISCOVER_JS)
+        except Exception:
+            return None
+
+    async def capture_all(
+        self,
+        action,
+        timeout_s=30,
+        settle_s=1.0,
+        until=None,
+    ):
+        found: list[CapturedResponse] = []
+        tasks: list[asyncio.Task] = []
+        last = [time.monotonic()]
 
         async def handle(resp):
-            if not rx.search(resp.url):
+            content_type = (
+                resp.headers.get("content-type") or ""
+            ).lower()
+
+            # Temporary diagnostics
+            print(
+                f"[NETWORK] {resp.status} "
+                f"{resp.request.method} "
+                f"{resp.url} "
+                f"content-type={content_type}"
+            )
+
+            # We only want responses that are likely to contain JSON.
+            is_json = (
+                "json" in content_type
+                or content_type.endswith("+json")
+            )
+
+            if not is_json:
                 return
+
             try:
                 data = await resp.json()
-            except Exception:
-                data = None
-            found.append(CapturedResponse(resp.url, resp.status, data))
-            done.set()
+            except Exception as exc:
+                print(
+                    f"[NETWORK] JSON parse failed: "
+                    f"{resp.url} ({exc})"
+                )
+                return
 
-        listener = lambda resp: tasks.append(asyncio.create_task(handle(resp)))  # noqa: E731
+            found.append(
+                CapturedResponse(
+                    resp.url,
+                    resp.status,
+                    data,
+                )
+            )
+
+            last[0] = time.monotonic()
+
+            print(
+                f"[JSON CAPTURED] {resp.status} {resp.url}"
+            )
+
+        listener = lambda resp: tasks.append(
+            asyncio.create_task(handle(resp))
+        )
+
         self.page.on("response", listener)
-        try:
-            await action()
-            await asyncio.wait_for(done.wait(), timeout_s)
-            await asyncio.sleep(0.3)
-        except asyncio.TimeoutError:
-            pass
-        finally:
-            self.page.remove_listener("response", listener)
-            await asyncio.gather(*tasks, return_exceptions=True)
-        return found
 
+        try:
+            print("[ACTION] Starting action")
+
+            await action()
+
+            print("[ACTION] Action completed")
+
+            start = time.monotonic()
+
+            while time.monotonic() - start < timeout_s:
+                await asyncio.sleep(0.25)
+
+                quiet = (
+                    time.monotonic() - last[0]
+                    >= settle_s
+                )
+
+                if until and until(found):
+                    print(
+                        f"[CAPTURE] Matching response found "
+                        f"after {len(found)} JSON responses"
+                    )
+                    await asyncio.sleep(settle_s)
+                    break
+
+                if until is None and found and quiet:
+                    break
+
+            if not found:
+                print(
+                    f"[CAPTURE] No JSON responses captured "
+                    f"within {timeout_s}s"
+                )
+
+        finally:
+            self.page.remove_listener(
+                "response",
+                listener,
+            )
+
+            await asyncio.gather(
+                *tasks,
+                return_exceptions=True,
+            )
+
+        print(
+            f"[CAPTURE] Returning {len(found)} JSON responses"
+        )
+
+        return found
     async def looks_blocked(self, markers=None):
-        text = ((await self.page.title()) + " " + (await self.page.inner_text("body"))[:2000]).lower()
+        try:
+            text = ((await self.page.title()) + " " + (await self.page.inner_text("body"))[:2000]).lower()
+        except Exception:
+            return False
         return any(m in text for m in (markers or DEFAULT_BLOCK_MARKERS))
 
     async def save_state(self):
@@ -95,8 +233,12 @@ class _PWSession(BrowserSession):
             os.chmod(self.state_path, 0o600)
 
     async def close(self):
-        await self.save_state()
-        await self.context.close()
+        try:
+            await self.save_state()
+        except Exception:
+            pass
+        finally:
+            await self.context.close()
 
 
 class PlaywrightProvider(BrowserProvider):

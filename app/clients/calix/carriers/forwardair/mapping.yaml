@@ -1,0 +1,4 @@
+# Calix x Forward Air. Start with nothing pinned; probe, then pin what you verified.
+aliases: [FWDA]
+# fields: {status: "TODO"}
+# site: {transport: http, http_url_template: "https://TODO/{ref}"}

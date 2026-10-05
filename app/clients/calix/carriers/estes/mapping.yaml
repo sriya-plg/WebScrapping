@@ -1,0 +1,11 @@
+# Calix x Estes. Everything here is OPTIONAL: with no overrides the engine uses the backend trackingUrl,
+# auto-detects the search box + the JSON call, and auto-maps common fields.
+# Run `python scripts/probe.py calix estes <PRO>` and pin what you verified, so a site change can't silently re-map.
+aliases: [EXLA]
+# fields:                       # common field <- raw JSON path ("a.b|c.d" = first non-empty)
+#   status: "shipment.status"
+#   delivery_date: "shipment.deliveryDate"
+# status_map: {"proof of delivery": DELIVERED}   # only for statuses the built-in rules don't understand
+# site:
+#   transport: http                                # Estes has open JSON endpoints: skip the browser entirely
+#   http_url_template: "https://TODO/{ref}"

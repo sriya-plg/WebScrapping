@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from app.core.postprocess import get_path
+from app.core.mapper import get_path
 from app.models import CarrierAccount, PendingBatch, PendingRef
 from app.settings import BackendSettings, CarrierSpec
 
