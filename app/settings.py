@@ -17,7 +17,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
-COMMON_FIELDS = {"status", "pickup_date", "delivery_date", "eta", "origin", "destination", "pieces", "weight"}
+COMMON_FIELDS = {"reference", "status", "pickup_date", "delivery_date", "eta", "origin", "destination", "pieces", "weight"}
 
 
 class _Strict(BaseModel):

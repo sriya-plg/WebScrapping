@@ -30,6 +30,17 @@ SUBMIT_ATTEMPTS = 3
 SUBMIT_ATTEMPT_TIMEOUT_S = 12
 SUBMIT_RETRY_PAUSE_S = 2
 
+# Tried in order when site.extra.consent_selectors is not set. "Reject" options first.
+DEFAULT_CONSENT_SELECTORS = [
+    "#onetrust-reject-all-handler",
+    "#CybotCookiebotDialogBodyButtonDecline",
+    "button:has-text('Reject All')",
+    "button:has-text('Reject all')",
+    "button:has-text('Decline')",
+    "button:has-text('Do Not Sell')",
+    "button:has-text('Do not sell')",
+]
+
 
 class Cache(Protocol):
     def get(self, name: str) -> dict | None: ...
@@ -101,6 +112,27 @@ class GenericAdapter(CarrierAdapter):
         """Hook: runs after the tracking page loads. Default: fail fast if we got a block page."""
         if await self.session.looks_blocked(self.spec.block_markers or None):
             raise BlockedError("block page on landing")
+        await self._dismiss_consent()
+
+    async def _dismiss_consent(self) -> bool:
+        """Click 'reject all' / 'do not sell' on a cookie banner if one appears. Never fails the run."""
+        s = self.session
+        sels = self.spec.site.extra.get("consent_selectors") or DEFAULT_CONSENT_SELECTORS
+        try:
+            if not await s.wait_for_selector(", ".join(sels), timeout_s=6):
+                return False                       # no banner: nothing to do
+        except Exception:
+            return False
+        for sel in sels:
+            try:
+                if await s.wait_for_selector(sel, timeout_s=0.5):
+                    await s.click(sel)
+                    self.log.info("dismissed cookie banner via %s", sel)
+                    await asyncio.sleep(1)         # let the banner animate away
+                    return True
+            except Exception as exc:
+                self.log.warning("consent click failed for %s: %s", sel, exc)
+        return False
 
     async def _resolve_selectors(self, force: bool = False) -> None:
         s = self.spec.site
@@ -191,10 +223,16 @@ class GenericAdapter(CarrierAdapter):
         # does not submit the tracking form. The click can fail fast when
         # the Angular form isn't ready, so we re-fill and click again.
         # --------------------------------------------------------------
+        # Preferred path: click the Search/Track button, retrying on a miss.
+        # More reliable than Enter for sites such as Estes, where Enter
+        # does not submit the tracking form. The click can fail fast when
+        # the Angular form isn't ready, so we re-fill and click again.
+        # --------------------------------------------------------------
         if sel.get("submit"):
             for attempt in range(1, SUBMIT_ATTEMPTS + 1):
                 try:
                     await s.fill(sel["input"], ref)      # re-fill: the app may have reset the form
+                    await self._before_submit(ref)
                     got = await s.capture_all(
                         lambda: s.click(sel["submit"]),
                         timeout_s=min(site.response_timeout_s, SUBMIT_ATTEMPT_TIMEOUT_S),
@@ -217,12 +255,18 @@ class GenericAdapter(CarrierAdapter):
         # a usable submit button.
         # --------------------------------------------------------------
         await s.fill(sel["input"], ref)
+        await self._before_submit(ref)
         got = await s.capture_all(
             lambda: s.press(sel["input"], "Enter"),
             timeout_s=site.response_timeout_s,
             **kw,
         )
         return all_got + got
+
+    async def _before_submit(self, ref: str) -> None:
+        """Hook called after typing reference and before clicking submit/pressing Enter.
+        Allows carrier adapters to handle intermediate steps (e.g. CAPTCHAs, consent prompts)
+        without duplicating _search()."""
 
     def _pick(self, got: list[CapturedResponse], ref: str) -> CapturedResponse | None:
         site = self.spec.site

@@ -1,4 +1,38 @@
-# Calix x Forward Air. Start with nothing pinned; probe, then pin what you verified.
+# Calix x Forward Air.
 aliases: [FWDA]
-# fields: {status: "TODO"}
-# site: {transport: http, http_url_template: "https://TODO/{ref}"}
+browser:
+  provider: patchright
+  headless: false
+  channel: chrome
+site:
+  tracking_url: "https://www.forwardair.com/tracking"
+  input_selector: "#fwrd-tracking-tags"
+  submit_selector: "button.trk-shp-btn"
+  response_regex: "/tracking/shipments"
+  match_ref: true
+  extra:
+    consent_selectors:
+      - "#onetrust-reject-all-handler"
+
+fields:
+  status: "results.0.CurrentStatusDescription"
+  delivery_date: "results.0.PodDate"
+  eta: "results.0.EstimatedAvailableDate"
+  origin: "results.0.originName"
+  destination: "results.0.destinationName"
+  pieces: "results.0.Pieces"
+  weight: "results.0.Weight"
+
+status_map:
+  "Invoiced": "IN_TRANSIT"
+  "Delivered": "DELIVERED"
+  "Picked Up": "PICKED_UP"
+  "Out for delivery": "OUT_FOR_DELIVERY"
+
+events:
+  path: "results.0.Statuses"
+  fields:
+    status: "StatusDescription"
+    timestamp: "RecordDate"
+    location: "AirportCode"
+    description: "StatusDescription"

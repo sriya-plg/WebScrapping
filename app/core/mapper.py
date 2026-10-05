@@ -17,9 +17,11 @@ def get_path(obj: Any, path: str, default: Any = None) -> Any:
     for alt in path.split("|"):
         cur, ok = obj, True
         for part in alt.strip().split("."):
+            if isinstance(cur, dict) and "data" in cur and len(cur) == 1 and part.strip("[]").isdigit():
+                cur = cur["data"]
             if isinstance(cur, list):
                 try:
-                    cur = cur[int(part)]
+                    cur = cur[int(part.strip("[]"))]
                 except (ValueError, IndexError):
                     ok = False
                     break
@@ -168,6 +170,8 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
     elif m.auto and (found := auto_events(raw)):
         events = found[1]
         notes.append(f"auto:events<-{found[0]}")
+    raw_ref = vals.pop("reference", None)
+    reference = str(raw_ref) if raw_ref else ref
     raw_status = vals.pop("status", None)
     status = status_from_text(str(raw_status), m.status_map) if raw_status else "UNKNOWN"
     if status == "UNKNOWN" and events:
@@ -177,7 +181,7 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
                 status = s
                 notes.append("status<-events")
                 break
-    return TrackingResult(reference=ref, ref_type=ref_type, carrier_code=spec.code, bill_to=account.bill_to,
+    return TrackingResult(reference=reference, ref_type=ref_type, carrier_code=spec.code, bill_to=account.bill_to,
                           status=status, raw_status=str(raw_status) if raw_status else None,
                           delivered=status == "DELIVERED", events=events, raw=raw, notes=notes, **vals)
 

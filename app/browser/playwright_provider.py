@@ -71,35 +71,60 @@ class _PWSession(BrowserSession):
         self.context, self.page, self.state_path = context, page, state_path
         page.set_default_timeout(nav_timeout_s * 1000)
 
+    def _target(self, selector: str, frame: str | None = None):
+        if frame:
+            return self.page.frame_locator(frame).locator(selector)
+        return self.page.locator(selector)
+
     async def goto(self, url):
         await self.page.goto(url, wait_until="domcontentloaded")
         await asyncio.sleep(random.uniform(0.8, 2.2))
 
-    async def fill(self, selector, value, human=True):
-        await self.page.click(selector)
+    async def fill(self, selector, value, human=True, frame=None):
+        target = self._target(selector, frame).first
+        await target.click()
         if human:
-            await self.page.fill(selector, "")
-            await self.page.type(selector, value, delay=random.randint(45, 140))
+            await target.fill("")
+            if hasattr(target, "press_sequentially"):
+                await target.press_sequentially(value, delay=random.randint(45, 140))
+            else:
+                await target.type(value, delay=random.randint(45, 140))
         else:
-            await self.page.fill(selector, value)
+            await target.fill(value)
 
-    async def click(self, selector):
+    async def click(self, selector, frame=None):
         await asyncio.sleep(random.uniform(0.3, 0.9))
-        await self.page.click(selector)
+        target = self._target(selector, frame).first
+        await target.click()
 
-    async def press(self, selector, key):
+    async def press(self, selector, key, frame=None):
         await asyncio.sleep(random.uniform(0.3, 0.9))
-        await self.page.press(selector, key)
+        target = self._target(selector, frame).first
+        await target.press(key)
 
-    async def select_option(self, selector, value):
-        await self.page.select_option(selector, value)
+    async def select_option(self, selector, value, frame=None):
+        target = self._target(selector, frame).first
+        await target.select_option(value)
 
-    async def wait_for_selector(self, selector, timeout_s=20):
+    async def wait_for_selector(self, selector, timeout_s=20, frame=None):
         try:
-            await self.page.wait_for_selector(selector, timeout=timeout_s * 1000)
+            target = self._target(selector, frame).first
+            await target.wait_for(state="attached", timeout=timeout_s * 1000)
             return True
         except Exception:
             return False
+
+    async def is_visible(self, selector, frame=None):
+        try:
+            target = self._target(selector, frame).first
+            return await target.is_visible()
+        except Exception:
+            return False
+
+    async def evaluate(self, expression, arg=None):
+        if arg is not None:
+            return await self.page.evaluate(expression, arg)
+        return await self.page.evaluate(expression)
 
     async def discover_search_box(self):
         try:

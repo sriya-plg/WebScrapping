@@ -36,3 +36,5 @@ app/logs/
 
 
 logs/
+
+.playwright-mcp/

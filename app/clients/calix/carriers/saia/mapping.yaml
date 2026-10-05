@@ -1,4 +1,4 @@
-# Calix x Saia. Needs adapter.py only for Cloudflare handling; mapping works like any other carrier.
+# Calix x Saia. Needs adapter.py for Cloudflare and reCAPTCHA handling; mapping works like any other carrier.
 aliases: [SAIA_LTL]
 browser:
   provider: patchright         # undetected-first; fall back to crawl4ai only if this gets blocked
@@ -8,6 +8,23 @@ limits: {max_concurrency: 1, min_delay_s: 8, max_delay_s: 20, retries: 2, breake
 block_markers: ["just a moment", "verify you are human", "attention required"]
 site:
   challenge_wait_s: 60
-  # extra:
-  #   login: {url: "https://TODO", user_selector: "TODO", pass_selector: "TODO", submit_selector: "TODO", logged_in_selector: "TODO"}
-# fields: {status: "TODO"}
+  tracking_url: "https://www.saia.com/track"
+  input_selector: "#trackingNumbers"
+  submit_selector: "button.track-button"
+  response_regex: "/api/v1/tracking/find-by-pro-number"
+  match_ref: true
+
+fields:
+  reference: "[0].referenceNumbers.proNumber"
+  status: "[0].shipment.status"
+  pickup_date: "[0].shipment.pickupDate"
+  delivery_date: "[0].delivery.deliveredDate"
+  eta: "[0].delivery.expectedDate"
+  origin: "[0].shipper.companyName"
+  destination: "[0].consignee.companyName"
+
+status_map:
+  "Delivered": "DELIVERED"
+  "In Transit": "IN_TRANSIT"
+  "Out for Delivery": "OUT_FOR_DELIVERY"
+  "Picked Up": "PICKED_UP"
