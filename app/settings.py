@@ -14,10 +14,25 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
-COMMON_FIELDS = {"reference", "status", "pickup_date", "delivery_date", "eta", "origin", "destination", "pieces", "weight"}
+COMMON_FIELDS = {
+    "reference",
+    "status",
+    "pickup_date",
+    "delivery_date",
+    "eta",
+    "origin",
+    "destination",
+    "pieces",
+    "weight",
+    "shipper",
+    "consignee",
+    "delivery_window",
+    "amount",
+    "current_location",
+}
 
 
 class _Strict(BaseModel):
@@ -55,20 +70,46 @@ class SiteConfig(_Strict):
     tracking_url: str | None = None      # default: trackingUrl from the backend record
     input_selector: str | None = None    # default: auto-detect the search box
     submit_selector: str | None = None   # default: press Enter, then an auto-detected button
-    response_regex: str | None = None    # default: any same-site JSON response containing the reference
+    result_selector: str | None = None   # wait condition: result container/row selector
+    not_found_selector: str | None = None # wait condition: not found indicator selector
     ref_type_select: str | None = None   # <select> for PRO/BOL if the site has one
     ref_type_map: dict[str, str] = {}
     transport: Literal["browser", "http"] = "browser"
     http_url_template: str | None = None  # transport=http: e.g. https://host/api/track/{ref}
-    match_ref: bool = True               # require the captured JSON to contain the reference we searched
     response_timeout_s: float = 30
     settle_s: float = 1.0
     challenge_wait_s: float = 60
     extra: dict[str, Any] = {}           # adapter-specific settings (e.g. Saia login)
 
 
+class ScrapingConfig(_Strict):
+    """Scrapling extraction configuration for rendered carrier tracking pages."""
+    strategy: str = "scrapling"
+    container_selector: str | None = None
+    row_selector: str | None = None
+    not_found_selector: str | None = None
+    not_found_text: list[str] = []
+    fields: dict[str, str] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _flatten_result(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "result" in data and isinstance(data["result"], dict):
+            res = data["result"]
+            data = dict(data)
+            data.pop("result")
+            for k in ("container_selector", "row_selector", "not_found_selector", "not_found_text"):
+                if k in res and k not in data:
+                    data[k] = res[k]
+            if "fields" in res:
+                merged_fields = dict(res["fields"])
+                merged_fields.update(data.get("fields", {}))
+                data["fields"] = merged_fields
+        return data
+
+
 class MappingConfig(_Strict):
-    """raw carrier JSON -> common schema. Explicit `fields` win; `auto` fills the gaps."""
+    """raw carrier data -> common schema. Explicit `fields` win; `auto` fills the gaps."""
     auto: bool = True
     fields: dict[str, str] = {}          # common field -> dotted path ("a.b|c.d" = first non-empty)
     status_map: dict[str, str] = {}      # carrier status text (any case) -> common status
@@ -92,6 +133,7 @@ class CarrierSpec(_Strict):
     limits: Limits = Limits()
     block_markers: list[str] = []
     site: SiteConfig = SiteConfig()
+    scraping: ScrapingConfig = ScrapingConfig()
     mapping: MappingConfig = MappingConfig()
     pending: dict[str, Any] = {}         # client-level: how to call/parse the pending-refs API
     payload_map: dict[str, str] = {}     # client-level: common schema -> backend payload keys
@@ -184,8 +226,14 @@ def load_resolver(clients_dir: str | Path) -> SpecResolver:
             try:
                 raw = yaml.safe_load(f.read_text()) or {}
                 mapping = {k: raw.pop(k) for k in list(raw) if k in _MAPPING_KEYS}
+                scraping = raw.pop("scraping", {})
+                if "site" in raw and isinstance(raw["site"], dict):
+                    raw["site"].pop("response_regex", None)
+                    raw["site"].pop("match_ref", None)
                 merged = _merge(defaults, raw)
                 merged["mapping"] = _merge(merged.get("mapping", {}), mapping)
+                if scraping:
+                    merged["scraping"] = _merge(merged.get("scraping", {}), scraping)
                 merged.update(code=code, client=key)
                 if not merged.get("post_hook") and (f.parent / "hooks.py").exists():
                     merged["post_hook"] = f"app.clients.{key}.carriers.{f.parent.name}.hooks:post"

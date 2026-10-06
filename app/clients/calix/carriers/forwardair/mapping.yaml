@@ -1,38 +1,50 @@
-# Calix x Forward Air.
+# Calix x Forward Air. Scrapling-based DOM extraction; uses generic adapter.
 aliases: [FWDA]
 browser:
   provider: patchright
   headless: false
   channel: chrome
+limits: {max_concurrency: 1, min_delay_s: 4, max_delay_s: 11, retries: 2, breaker_threshold: 3, breaker_cooldown_s: 3600}
+block_markers: ["just a moment", "verify you are human", "attention required", "access denied"]
 site:
   tracking_url: "https://www.forwardair.com/tracking"
-  input_selector: "#fwrd-tracking-tags"
-  submit_selector: "button.trk-shp-btn"
-  response_regex: "/tracking/shipments"
-  match_ref: true
+  input_selector: "#fwrd-tracking-tags, input[placeholder*='Add waybill']"
+  submit_selector: "button.trk-shp-btn, button:has-text('Track Shipments')"
+  result_selector: "[class*='fwrd-listing-result'], a[class*='listing']"
+  not_found_selector: ".no-results, [class*='no-shipment']"
+  response_timeout_s: 30
+  settle_s: 1.0
   extra:
     consent_selectors:
       - "#onetrust-reject-all-handler"
+      - "button:has-text('Reject All')"
+
+scraping:
+  strategy: scrapling
+  container_selector: "[class*='fwrd-listing-result']"
+  row_selector: "a[class*='listing'], [class*='listing']"
+  not_found_selector: ".no-results, [class*='no-shipment']"
+  fields:
+    reference: "[class*='shipment-number'] [class*='shipment-number']"
+    status: "[class*='status'] [class*='header'], [class*='status'] .header"
+    origin: "[class*='origin-location'] [class*='copy']"
+    destination: "[class*='destination-location'] [class*='copy']"
+    amount: "[class*='amount'] [class*='copy']"
+    current_location: "[class*='current-location'] [class*='copy']"
 
 fields:
-  status: "results.0.CurrentStatusDescription"
-  delivery_date: "results.0.PodDate"
-  eta: "results.0.EstimatedAvailableDate"
-  origin: "results.0.originName"
-  destination: "results.0.destinationName"
-  pieces: "results.0.Pieces"
-  weight: "results.0.Weight"
+  reference: "reference"
+  status: "status"
+  origin: "origin"
+  destination: "destination|consignee"
+  pieces: "pieces"
+  weight: "weight"
 
 status_map:
+  "On-time": "IN_TRANSIT"
   "Invoiced": "IN_TRANSIT"
+  "In Transit": "IN_TRANSIT"
   "Delivered": "DELIVERED"
   "Picked Up": "PICKED_UP"
   "Out for delivery": "OUT_FOR_DELIVERY"
-
-events:
-  path: "results.0.Statuses"
-  fields:
-    status: "StatusDescription"
-    timestamp: "RecordDate"
-    location: "AirportCode"
-    description: "StatusDescription"
+  "Cancelled": "EXCEPTION"

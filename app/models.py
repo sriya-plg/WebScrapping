@@ -59,7 +59,7 @@ def _num(v: Any) -> float | None:
 
 class TrackingResult(BaseModel):
     """Common schema every adapter normalizes into."""
-    model_config = ConfigDict(coerce_numbers_to_str=True)
+    model_config = ConfigDict(coerce_numbers_to_str=True, extra="ignore")
     reference: str
     ref_type: str
     carrier_code: str
@@ -74,6 +74,9 @@ class TrackingResult(BaseModel):
     destination: str | None = None
     pieces: int | None = None
     weight: float | None = None
+    shipper: str | None = None
+    consignee: str | None = None
+    delivery_window: str | None = None
     events: list[TrackingEvent] = []
     scraped_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     raw: dict[str, Any] = {}

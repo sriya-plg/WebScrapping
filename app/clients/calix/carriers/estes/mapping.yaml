@@ -1,11 +1,49 @@
-# Calix x Estes. Everything here is OPTIONAL: with no overrides the engine uses the backend trackingUrl,
-# auto-detects the search box + the JSON call, and auto-maps common fields.
-# Run `python scripts/probe.py calix estes <PRO>` and pin what you verified, so a site change can't silently re-map.
+# Calix x Estes. Scrapling-based DOM extraction; uses generic adapter.
 aliases: [EXLA]
-# fields:                       # common field <- raw JSON path ("a.b|c.d" = first non-empty)
-#   status: "shipment.status"
-#   delivery_date: "shipment.deliveryDate"
-# status_map: {"proof of delivery": DELIVERED}   # only for statuses the built-in rules don't understand
-# site:
-#   transport: http                                # Estes has open JSON endpoints: skip the browser entirely
-#   http_url_template: "https://TODO/{ref}"
+browser:
+  provider: patchright
+  headless: false
+  channel: chrome
+limits: {max_concurrency: 1, min_delay_s: 4, max_delay_s: 11, retries: 2, breaker_threshold: 3, breaker_cooldown_s: 3600}
+block_markers: ["just a moment", "verify you are human", "attention required", "access denied"]
+site:
+  tracking_url: "https://www.estes-express.com/myestes/shipment-tracking/"
+  input_selector: "#criteria, textarea#criteria, textarea"
+  submit_selector: "#shipmentTrackingSubmitButton, button:has-text('Search')"
+  result_selector: "table.mat-mdc-table, table.table"
+  not_found_selector: ".no-records, .error-message"
+  response_timeout_s: 30
+  settle_s: 1.0
+
+scraping:
+  strategy: scrapling
+  container_selector: "table#tblData, table.mat-mdc-table"
+  row_selector: "table#tblData tbody tr, table#tblData tr:has(td), tr.mat-mdc-row"
+  not_found_selector: ".no-records, .error-message"
+  fields:
+    reference: "td:nth-of-type(1), td.mat-column-proNumber"
+    pickup_date: "td:nth-of-type(2), td.mat-column-pickupDate"
+    eta: "td:nth-of-type(3), td.mat-column-estimatedDelivery"
+    status: "td:nth-of-type(4), td.mat-column-status"
+    origin: "td:nth-of-type(5)"
+    pieces: "td:nth-of-type(6)"
+    weight: "td:nth-of-type(7)"
+    destination: "td:nth-of-type(10)"
+    delivery_date: "td:nth-of-type(13)"
+
+fields:
+  reference: "reference"
+  status: "status"
+  pickup_date: "pickup_date"
+  delivery_date: "delivery_date"
+  eta: "eta"
+  origin: "origin"
+  destination: "destination|consignee"
+  pieces: "pieces"
+  weight: "weight"
+
+status_map:
+  "Delivered": "DELIVERED"
+  "In Transit": "IN_TRANSIT"
+  "Out for Delivery": "OUT_FOR_DELIVERY"
+  "Picked Up": "PICKED_UP"

@@ -39,3 +39,4 @@ logs/
 
 .playwright-mcp/
 state/
+scratch/

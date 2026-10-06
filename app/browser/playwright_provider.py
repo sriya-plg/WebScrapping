@@ -1,5 +1,5 @@
 """Playwright provider. engine='playwright' (+playwright-stealth) or engine='patchright' (undetected fork,
-same API). Prefers capturing the JSON the page itself fetches over DOM scraping."""
+same API). Drives browser sessions for page navigation and Scrapling extraction."""
 from __future__ import annotations
 
 import asyncio
@@ -8,9 +8,9 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
-from app.browser.base import DEFAULT_BLOCK_MARKERS, BrowserProvider, BrowserSession, CapturedResponse
+from app.browser.base import DEFAULT_BLOCK_MARKERS, BrowserProvider, BrowserSession
 from app.settings import BrowserConfig
 
 
@@ -132,118 +132,8 @@ class _PWSession(BrowserSession):
         except Exception:
             return None
 
-    async def capture_all(
-        self,
-        action,
-        timeout_s=30,
-        settle_s=1.0,
-        until=None,
-    ):
-        found: list[CapturedResponse] = []
-        tasks: list[asyncio.Task] = []
-        last = [time.monotonic()]
-
-        async def handle(resp):
-            content_type = (
-                resp.headers.get("content-type") or ""
-            ).lower()
-
-            # Temporary diagnostics
-            print(
-                f"[NETWORK] {resp.status} "
-                f"{resp.request.method} "
-                f"{resp.url} "
-                f"content-type={content_type}"
-            )
-
-            # We only want responses that are likely to contain JSON.
-            is_json = (
-                "json" in content_type
-                or content_type.endswith("+json")
-            )
-
-            if not is_json:
-                return
-
-            try:
-                data = await resp.json()
-            except Exception as exc:
-                print(
-                    f"[NETWORK] JSON parse failed: "
-                    f"{resp.url} ({exc})"
-                )
-                return
-
-            found.append(
-                CapturedResponse(
-                    resp.url,
-                    resp.status,
-                    data,
-                )
-            )
-
-            last[0] = time.monotonic()
-
-            print(
-                f"[JSON CAPTURED] {resp.status} {resp.url}"
-            )
-
-        listener = lambda resp: tasks.append(
-            asyncio.create_task(handle(resp))
-        )
-
-        self.page.on("response", listener)
-
-        try:
-            print("[ACTION] Starting action")
-
-            await action()
-
-            print("[ACTION] Action completed")
-
-            start = time.monotonic()
-
-            while time.monotonic() - start < timeout_s:
-                await asyncio.sleep(0.25)
-
-                quiet = (
-                    time.monotonic() - last[0]
-                    >= settle_s
-                )
-
-                if until and until(found):
-                    print(
-                        f"[CAPTURE] Matching response found "
-                        f"after {len(found)} JSON responses"
-                    )
-                    await asyncio.sleep(settle_s)
-                    break
-
-                if until is None and found and quiet:
-                    break
-
-            if not found:
-                print(
-                    f"[CAPTURE] No JSON responses captured "
-                    f"within {timeout_s}s"
-                )
-
-        finally:
-            self.page.remove_listener(
-                "response",
-                listener,
-            )
-
-            await asyncio.gather(
-                *tasks,
-                return_exceptions=True,
-            )
-
-        print(
-            f"[CAPTURE] Returning {len(found)} JSON responses"
-        )
-
-        return found
+    async def content(self) -> str:
+        return await self.page.content()
     async def looks_blocked(self, markers=None):
         try:
             text = ((await self.page.title()) + " " + (await self.page.inner_text("body"))[:2000]).lower()

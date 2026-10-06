@@ -181,6 +181,15 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
                 status = s
                 notes.append("status<-events")
                 break
+    if vals.get("consignee") and not vals.get("destination"):
+        vals["destination"] = vals["consignee"]
+    elif vals.get("destination") and not vals.get("consignee"):
+        vals["consignee"] = vals["destination"]
+    if vals.get("shipper") and not vals.get("origin"):
+        vals["origin"] = vals["shipper"]
+    elif vals.get("origin") and not vals.get("shipper"):
+        vals["shipper"] = vals["origin"]
+
     return TrackingResult(reference=reference, ref_type=ref_type, carrier_code=spec.code, bill_to=account.bill_to,
                           status=status, raw_status=str(raw_status) if raw_status else None,
                           delivered=status == "DELIVERED", events=events, raw=raw, notes=notes, **vals)

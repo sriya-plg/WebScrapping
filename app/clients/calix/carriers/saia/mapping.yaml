@@ -1,4 +1,4 @@
-# Calix x Saia. Needs adapter.py for Cloudflare and reCAPTCHA handling; mapping works like any other carrier.
+# Calix x Saia. Scrapling-based DOM extraction; adapter.py handles Cloudflare and reCAPTCHA.
 aliases: [SAIA_LTL]
 browser:
   provider: patchright         # undetected-first; fall back to crawl4ai only if this gets blocked
@@ -11,17 +11,33 @@ site:
   tracking_url: "https://www.saia.com/track"
   input_selector: "#trackingNumbers"
   submit_selector: "button.track-button"
-  response_regex: "/api/v1/tracking/find-by-pro-number"
-  match_ref: true
+  result_selector: "#trackingResults"
+  not_found_selector: "td.no-pro-found"
+  response_timeout_s: 30
+  settle_s: 0.5
+
+scraping:
+  strategy: scrapling
+  container_selector: "#trackingResults"
+  row_selector: "tr.pro-to-track"
+  not_found_selector: "td.no-pro-found"
+  fields:
+    reference: "td:nth-of-type(1)"
+    status: "td:nth-of-type(2)"
+    pickup_date: "td:nth-of-type(3)"
+    eta: "td:nth-of-type(4)"
+    delivery_date: "td:nth-of-type(5)"
+    delivery_window: "td:nth-of-type(6)"
+    consignee: "td:nth-of-type(7)"
 
 fields:
-  reference: "[0].referenceNumbers.proNumber"
-  status: "[0].shipment.status"
-  pickup_date: "[0].shipment.pickupDate"
-  delivery_date: "[0].delivery.deliveredDate"
-  eta: "[0].delivery.expectedDate"
-  origin: "[0].shipper.companyName"
-  destination: "[0].consignee.companyName"
+  reference: "reference"
+  status: "status"
+  pickup_date: "pickup_date"
+  delivery_date: "delivery_date"
+  eta: "eta"
+  destination: "destination|consignee"
+  delivery_window: "delivery_window"
 
 status_map:
   "Delivered": "DELIVERED"
