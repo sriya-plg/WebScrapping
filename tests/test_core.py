@@ -6,7 +6,7 @@ import pytest
 
 from app.core import registry
 from app.core.intervention import InterventionQueue
-from app.core.postprocess import build_payload, get_path
+from app.core.mapper import build_payload, get_path
 from app.core.resilience import CircuitBreaker, NotFoundError, TransientError, retry
 from app.core.runner import Runner
 from app.core.scheduler import JitterSchedule
@@ -32,9 +32,9 @@ def test_jitter_bounds_restart_safe_and_no_drift():
 
 
 def test_estes_normalize_from_fixture():
-    from app.clients.calix.carriers.estes.adapter import EstesAdapter
+    from app.core.adapter import GenericAdapter
     raw = json.loads((ROOT / "tests/fixtures/estes_response.json").read_text())
-    a = EstesAdapter(RES.resolve("CALIX", "ESTES"), ACCT, None)
+    a = GenericAdapter(RES.resolve("CALIX", "ESTES"), ACCT, None)
     r = a.normalize(raw, "1234567890", "PRO")
     assert r.status == "DELIVERED" and r.delivered and r.weight == 1250.0 and r.pieces == 4
     assert r.events[0].description == "Delivered"
@@ -48,6 +48,7 @@ def test_get_path_fallbacks():
     assert get_path({"l": [{"k": 2}]}, "l.0.k") == 2
 
 
+@pytest.mark.asyncio
 async def test_retry_and_breaker():
     n = {"c": 0}
 
@@ -64,6 +65,7 @@ async def test_retry_and_breaker():
     t[0] = 101; assert b.allow()
 
 
+@pytest.mark.asyncio
 async def test_partial_failure_and_idempotency(tmp_path):
     from app.core.adapter import CarrierAdapter
     from app.models import TrackingResult
@@ -83,8 +85,10 @@ async def test_partial_failure_and_idempotency(tmp_path):
         v.limits.min_delay_s = v.limits.max_delay_s = 0
         v.limits.retries = 1
     store = StateStore(":memory:")
-    mk = lambda: Runner(s, FileBackend(s.backend), store, InterventionQueue(store, AlertSettings()), specs,
-                        provider_factory=lambda cfg, d: type("P", (), {"close": lambda self: _noop()})())
+    from app.core.job import Services
+    sv = Services(s, FileBackend(s.backend), store, InterventionQueue(store, AlertSettings()),
+                  provider_factory=lambda cfg, d: type("P", (), {"close": lambda self: _noop()})())
+    mk = lambda: Runner(sv, specs)
     async def _noop(): return None
     m1 = await mk().run_once(force=True)
     assert m1["calix/ESTES"]["success"] == 1 and m1["calix/ESTES"]["failed"] == 1 and m1["calix/ESTES"]["posted"] == 1
@@ -97,16 +101,17 @@ async def test_partial_failure_and_idempotency(tmp_path):
 def test_client_folder_resolution_and_discovery():
     RES = load_resolver(ROOT / "app/clients")
     s = RES.resolve("CALIX", "ESTES")
+    saia = RES.resolve("CALIX", "SAIA")
     assert s.client == "calix" and s.code == "ESTES"
     assert s.pending["endpoint"].startswith("/calix/")            # from client.yaml defaults
-    assert s.adapter["tracking_page"].startswith("https://www.estes")  # from the carrier's own config.yaml
+    assert saia.site.tracking_url.startswith("https://www.saia")
     assert s.post_hook == "app.clients.calix.carriers.estes.hooks:post"  # auto-detected hooks.py
     assert RES.resolve("calix", "exla") is s and RES.resolve("CALIX", "FWDA").code == "FORWARDAIR"  # aliases
     assert RES.carriers("calix") == ["ESTES", "FORWARDAIR", "SAIA"]
     assert RES.resolve("OTHERCO", "ESTES") is None
     registry._REG.clear(); registry.discover()
     assert registry.get_adapter_class("SAIA", "calix").__name__ == "SaiaAdapter"
-    assert registry.get_adapter_class("FORWARDAIR", "calix").__name__ == "ForwardAirAdapter"
+    assert registry.get_adapter_class("FORWARDAIR", "calix").__name__ == "GenericAdapter"
     from app.models import TrackingResult
     p = build_payload(s, TrackingResult(reference="1", ref_type="PRO", carrier_code="ESTES", bill_to="CALIX",
                                         delivery_date="2026-10-01T10:00"), ACCT, "r")

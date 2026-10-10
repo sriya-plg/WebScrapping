@@ -8,6 +8,44 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
+class CarrierConfig(BaseModel):
+    """Carrier configuration returned by the shipment backend."""
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+    id: int
+    carrier_name: str = Field(alias="carrierName")
+    carrier_code: str = Field(alias="carrierCode")
+    tracking_url: str | None = Field(None, alias="trackingUrl")
+    bill_to: int = Field(alias="billTo")
+    customer_name: str | None = Field(None, alias="customerName")
+    processing_frequency: int | None = Field(None, alias="processingFrequency")
+    processing_delay: int | None = Field(None, alias="processingDelay")
+    user_name: str | None = Field(None, alias="userName")
+    password: SecretStr | None = None
+    is_active: bool = Field(alias="isActive")
+    created_by: int | None = Field(None, alias="createdBy")
+    search_by: str = Field("proNumber", alias="searchBy")
+
+
+class ShipmentRef(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+    housebill: str
+    pro_number: str = Field(alias="proNumber")
+    vendor_id: str = Field(alias="vendorId")
+
+
+class TrackingJob(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    carrier: CarrierConfig
+    shipment: ShipmentRef
+    search_by: str
+    search_value: str
+
+    def __repr__(self) -> str:
+        return (f"TrackingJob(carrier_code={self.carrier.carrier_code!r}, "
+                f"bill_to={self.carrier.bill_to!r}, search_by={self.search_by!r}, "
+                f"search_value={self.search_value!r}, credentials=<redacted>)")
+
+
 class CarrierAccount(BaseModel):
     """One record from the backend 'carrier config' API (camelCase on the wire).
     Credentials are SecretStr: masked in repr/logs, held in memory only."""
@@ -25,6 +63,7 @@ class CarrierAccount(BaseModel):
     password: SecretStr | None = None
     is_active: bool = Field(True, alias="isActive")
     total_count: int | None = Field(None, alias="totalCount")
+    search_by: str = Field("proNumber", alias="searchBy")
 
 
 class PendingRef(BaseModel):

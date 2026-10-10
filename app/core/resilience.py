@@ -21,6 +21,10 @@ class NotFoundError(Exception):
     """Reference doesn't exist at the carrier (yet). Not an error for the batch."""
 
 
+class ChallengeError(Exception):
+    """Bot-check or Cloudflare challenge detected."""
+
+
 class ManualInterventionRequired(Exception):
     def __init__(self, reason: str, url: str | None = None):
         super().__init__(reason)

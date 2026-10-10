@@ -9,17 +9,23 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
-from app.backend.client import BackendClient
+from app.backend.client import BackendClient, BackendUnavailable
 from app.core.intervention import InterventionQueue
 from app.core.mapper import build_payload
 from app.core.metrics import RunMetrics
 from app.core.registry import get_adapter_class
-from app.core.resilience import (BlockedError, CircuitBreaker, ManualInterventionRequired, NotFoundError,
-                                 Pacer, retry)
+from app.core.resilience import (
+    BlockedError,
+    CircuitBreaker,
+    ManualInterventionRequired,
+    NotFoundError,
+    Pacer,
+    retry,
+)
 from app.core.state import KVCache, StateStore
 from app.logging_setup import log
 from app.models import CarrierAccount, PendingRef, TrackingResult
@@ -72,8 +78,8 @@ class AccountJob:
                 self.m.count(self.lbl, "skipped_circuit_open")
                 log(logger, logging.WARNING, "circuit open; skipping", bill_to=self.a.bill_to)
                 return
-            batch = await retry(lambda: self.sv.backend.get_pending(self.a, self.spec), attempts=3, base=2,
-                                cap=30, retry_on=(Exception,))
+            batch = await retry(lambda: self.sv.backend.get_pending(self.a, self.spec), attempts=1, base=2,
+                                cap=30, retry_on=(BackendUnavailable,))
             if not batch.refs:
                 self._touch()
                 return

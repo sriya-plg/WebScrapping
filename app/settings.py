@@ -26,6 +26,7 @@ class _Strict(BaseModel):
 
 class BrowserConfig(_Strict):
     provider: Literal["playwright_stealth", "patchright", "crawl4ai"] = "playwright_stealth"
+    browser_mode: Literal["playwright_stealth", "patchright"] | None = None
     headless: bool = True
     channel: str | None = None          # e.g. "chrome" (recommended with patchright)
     locale: str = "en-US"
@@ -54,8 +55,24 @@ class SiteConfig(_Strict):
     Set a value only to override a wrong auto-detection."""
     tracking_url: str | None = None      # default: trackingUrl from the backend record
     input_selector: str | None = None    # default: auto-detect the search box
-    submit_selector: str | None = None   # default: press Enter, then an auto-detected button
+    submit_selector: str | None = None   # button to click; BatchScraper never relies on Enter
     response_regex: str | None = None    # default: any same-site JSON response containing the reference
+    response_url_pattern: str | None = None
+    expected_response_shape: Literal["single_batch", "per_pro"] = "per_pro"
+    response_pro_path: str = "proNumber"
+    input_mode: Literal["multiline", "delimited"] = "multiline"
+    delimiter: str = "\n"
+    batch_size: int = 1
+    strip_spaces_dashes: bool = True
+    strip_leading_zeros: bool = False
+    action_min_delay_s: float = 0.4
+    action_max_delay_s: float = 1.2
+    typing_delay_ms: float = 0.0         # per-character typing delay in ms (0 = instant fill)
+    inter_pro_delay_s: float = 0.0       # pause between typing individual PRO numbers in seconds
+    pre_submit_delay_s: float = 0.0      # pause before submitting tracking form in seconds
+    inter_batch_delay_s: float = 0.0     # pause between separate batches in seconds
+    idle_window_s: float = 2.0
+    login: dict[str, Any] | None = None
     ref_type_select: str | None = None   # <select> for PRO/BOL if the site has one
     ref_type_map: dict[str, str] = {}
     transport: Literal["browser", "http"] = "browser"
@@ -65,6 +82,21 @@ class SiteConfig(_Strict):
     settle_s: float = 1.0
     challenge_wait_s: float = 60
     extra: dict[str, Any] = {}           # adapter-specific settings (e.g. Saia login)
+
+    @field_validator("batch_size")
+    @classmethod
+    def _positive_batch_size(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("batch_size must be at least 1")
+        return value
+
+    @field_validator("action_max_delay_s")
+    @classmethod
+    def _delay_order(cls, value: float, info):
+        minimum = info.data.get("action_min_delay_s", 0)
+        if value < minimum:
+            raise ValueError("action_max_delay_s must be >= action_min_delay_s")
+        return value
 
 
 class MappingConfig(_Strict):
@@ -106,10 +138,18 @@ class BackendSettings(_Strict):
     post_path: str = "/tracking/bulk"
     stub_dir: str = "stub"
     outbox_dir: str = "out"
+    carrier_config_path: str = "/api/orderentry/GetCarrierConfigurationDetails"
+    shipments_path: str = "/api/orderentry/GetCarrierShipmentDetails"
+    carrier_config_method: Literal["GET", "POST"] = "GET"
+    timeout_seconds: float = 30
+    retry_attempts: int = 3
+    auth_header: str = "Authorization"
+    auth_scheme: str = "Bearer"
+    credential_resolver: str = "identity"
 
 
 class ScheduleSettings(_Strict):
-    interval_minutes: int = 360
+    interval_hours: int = 6
     jitter_minutes: int = 25
     seed: str = "tracker"
 
@@ -124,6 +164,7 @@ class AppSettings(_Strict):
     state_db: str = "state/tracker.db"
     state_dir: str = "state/browser"
     samples_dir: str = "state/samples"   # raw JSON saved when mapping fails / status unknown (to write mapping.yaml)
+    debug_dir: str = "state/debug"
     clients_dir: str = "app/clients"
     backend: BackendSettings = BackendSettings()
     schedule: ScheduleSettings = ScheduleSettings()

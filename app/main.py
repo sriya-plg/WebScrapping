@@ -61,7 +61,7 @@ async def daemon(s, runner, store):
     cfg = s.schedule
     anchor = float(store.kv_get("schedule_anchor") or 0) or time.time()
     store.kv_set("schedule_anchor", str(anchor))
-    sched = JitterSchedule(anchor, cfg.interval_minutes * 60, cfg.jitter_minutes * 60, cfg.seed)
+    sched = JitterSchedule(anchor, cfg.interval_hours * 3600, cfg.jitter_minutes * 60, cfg.seed)
     while True:
         at = sched.next_after(time.time())
         logger.info("next run at %s", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(at)))

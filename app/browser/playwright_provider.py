@@ -92,6 +92,36 @@ class _PWSession(BrowserSession):
         else:
             await target.fill(value)
 
+    async def type_text(self, selector, text, delay_ms=0, clear=False, frame=None):
+        target = self._target(selector, frame).first
+        if clear:
+            await target.click()
+            await target.fill("")
+        else:
+            await target.click()
+        if not text:
+            return
+        if delay_ms > 0:
+            if hasattr(target, "press_sequentially"):
+                await target.press_sequentially(text, delay=delay_ms)
+            else:
+                await target.type(text, delay=delay_ms)
+        else:
+            if clear:
+                await target.fill(text)
+            else:
+                if hasattr(target, "press_sequentially"):
+                    await target.press_sequentially(text)
+                else:
+                    await target.type(text)
+
+    async def get_value(self, selector, frame=None):
+        try:
+            target = self._target(selector, frame).first
+            return await target.input_value()
+        except Exception:
+            return ""
+
     async def click(self, selector, frame=None):
         await asyncio.sleep(random.uniform(0.3, 0.9))
         target = self._target(selector, frame).first
@@ -148,14 +178,6 @@ class _PWSession(BrowserSession):
                 resp.headers.get("content-type") or ""
             ).lower()
 
-            # Temporary diagnostics
-            print(
-                f"[NETWORK] {resp.status} "
-                f"{resp.request.method} "
-                f"{resp.url} "
-                f"content-type={content_type}"
-            )
-
             # We only want responses that are likely to contain JSON.
             is_json = (
                 "json" in content_type
@@ -167,11 +189,7 @@ class _PWSession(BrowserSession):
 
             try:
                 data = await resp.json()
-            except Exception as exc:
-                print(
-                    f"[NETWORK] JSON parse failed: "
-                    f"{resp.url} ({exc})"
-                )
+            except Exception:
                 return
 
             found.append(
@@ -184,9 +202,6 @@ class _PWSession(BrowserSession):
 
             last[0] = time.monotonic()
 
-            print(
-                f"[JSON CAPTURED] {resp.status} {resp.url}"
-            )
 
         listener = lambda resp: tasks.append(
             asyncio.create_task(handle(resp))
@@ -195,11 +210,7 @@ class _PWSession(BrowserSession):
         self.page.on("response", listener)
 
         try:
-            print("[ACTION] Starting action")
-
             await action()
-
-            print("[ACTION] Action completed")
 
             start = time.monotonic()
 
@@ -212,21 +223,14 @@ class _PWSession(BrowserSession):
                 )
 
                 if until and until(found):
-                    print(
-                        f"[CAPTURE] Matching response found "
-                        f"after {len(found)} JSON responses"
-                    )
                     await asyncio.sleep(settle_s)
+                    break
+                if until is not None and found and quiet:
                     break
 
                 if until is None and found and quiet:
                     break
 
-            if not found:
-                print(
-                    f"[CAPTURE] No JSON responses captured "
-                    f"within {timeout_s}s"
-                )
 
         finally:
             self.page.remove_listener(
@@ -239,11 +243,16 @@ class _PWSession(BrowserSession):
                 return_exceptions=True,
             )
 
-        print(
-            f"[CAPTURE] Returning {len(found)} JSON responses"
-        )
-
         return found
+
+    async def save_debug(self, path: str) -> str:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        await self.page.screenshot(path=str(target), full_page=True)
+        return str(target)
+
+    def current_url(self) -> str:
+        return self.page.url
     async def looks_blocked(self, markers=None):
         try:
             text = ((await self.page.title()) + " " + (await self.page.inner_text("body"))[:2000]).lower()

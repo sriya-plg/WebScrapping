@@ -1,14 +1,28 @@
 # Calix x Forward Air.
-aliases: [FWDA]
+aliases: [FWDA, FORW-LTL]
 browser:
   provider: patchright
+  browser_mode: patchright
   headless: false
   channel: chrome
 site:
   tracking_url: "https://www.forwardair.com/tracking"
-  input_selector: "#fwrd-tracking-tags"
-  submit_selector: "button.trk-shp-btn"
-  response_regex: "/tracking/shipments"
+  # TODO: verify selectors and response contract from browser network capture.
+  input_selector: "TODO_REPLACE_TRACKING_INPUT"
+  submit_selector: "TODO_REPLACE_SEARCH_BUTTON"
+  input_mode: delimited
+  delimiter: ","
+  batch_size: 10
+  response_url_pattern: "TODO_REPLACE_TRACKING_API_PATTERN"
+  expected_response_shape: single_batch
+  response_pro_path: "TODO_REPLACE_JSON_PATH_TO_PRO"
+  strip_spaces_dashes: true
+  strip_leading_zeros: false
+  response_timeout_s: 45
+  idle_window_s: 2
+  action_min_delay_s: 0.6
+  action_max_delay_s: 1.5
+  login: null
   match_ref: true
   extra:
     consent_selectors:

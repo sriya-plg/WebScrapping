@@ -1,6 +1,6 @@
 # Everything shared by ALL Calix carriers. A carrier's own config.yaml overrides/extends this.
 name: Calix
-bill_to: [CALIX]                 # backend billTo codes handled by this folder
+bill_to: [CALIX, "134034"]      # backend billTo codes handled by this folder
 defaults:
   pending:                       # Calix's "pending housebills" API (same shape for every carrier here)
     endpoint: /calix/housebills/pending?carrier={carrier_code}

@@ -1,11 +1,28 @@
 # Calix x Estes. Everything here is OPTIONAL: with no overrides the engine uses the backend trackingUrl,
 # auto-detects the search box + the JSON call, and auto-maps common fields.
 # Run `python scripts/probe.py calix estes <PRO>` and pin what you verified, so a site change can't silently re-map.
-aliases: [EXLA]
+aliases: [EXLA, ESTE03]
+browser:
+  browser_mode: playwright_stealth
+  headless: true
+site:
+  # TODO: inspect Estes tracking page and replace all selector/pattern values.
+  input_selector: "TODO_REPLACE_TRACKING_INPUT"
+  submit_selector: "TODO_REPLACE_SEARCH_BUTTON"
+  input_mode: multiline
+  delimiter: "\n"
+  batch_size: 10
+  response_url_pattern: "TODO_REPLACE_TRACKING_API_PATTERN"
+  expected_response_shape: single_batch
+  response_pro_path: "TODO_REPLACE_JSON_PATH_TO_PRO"
+  strip_spaces_dashes: true
+  strip_leading_zeros: false
+  response_timeout_s: 30
+  idle_window_s: 2
+  action_min_delay_s: 0.5
+  action_max_delay_s: 1.2
+# Optional login shape: {required: true, url: "TODO", selectors: {username: "TODO", password: "TODO", submit: "TODO", success: "TODO"}}
 # fields:                       # common field <- raw JSON path ("a.b|c.d" = first non-empty)
 #   status: "shipment.status"
 #   delivery_date: "shipment.deliveryDate"
 # status_map: {"proof of delivery": DELIVERED}   # only for statuses the built-in rules don't understand
-# site:
-#   transport: http                                # Estes has open JSON endpoints: skip the browser entirely
-#   http_url_template: "https://TODO/{ref}"

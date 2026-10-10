@@ -1,0 +1,21 @@
+[
+  {
+    "referenceNumbers": {
+      "proNumber": "771043317403"
+    },
+    "shipment": {
+      "status": "In Transit",
+      "pickupDate": "2026-10-08"
+    },
+    "delivery": {
+      "deliveredDate": null,
+      "expectedDate": "2026-10-12"
+    },
+    "shipper": {
+      "companyName": "[SANITIZED SHIPPER]"
+    },
+    "consignee": {
+      "companyName": "[SANITIZED CONSIGNEE]"
+    }
+  }
+]
