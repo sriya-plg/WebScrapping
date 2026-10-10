@@ -143,7 +143,18 @@ class GenericAdapter(CarrierAdapter):
         if cached:
             self._sel = {**cached, "source": "cache"}
             return
-        found = await self.session.discover_search_box()
+        # A committed navigation can precede SPA hydration. Give the tracking form
+        # time to render instead of treating an initially empty DOM as final.
+        deadline = asyncio.get_running_loop().time() + self.spec.site.response_timeout_s
+        found = None
+        while not found or not found.get("input"):
+            found = await self.session.discover_search_box()
+            if found and found.get("input"):
+                break
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.5, remaining))
         if not found or not found.get("input"):
             raise ManualInterventionRequired("could not find a search box; set site.input_selector in mapping.yaml",
                                              self.url)
@@ -210,7 +221,7 @@ class GenericAdapter(CarrierAdapter):
 
         kw = dict(
             settle_s=site.settle_s,
-            until=lambda rs: self._pick(rs, ref) is not None,
+            until=lambda rs: self._pick(rs, ref) is not None or self._has_not_found(rs),
         )
 
         # Keep every response seen across attempts so _raise_for_miss can diagnose properly
@@ -241,8 +252,12 @@ class GenericAdapter(CarrierAdapter):
                     all_got += got
                     if self._pick(got, ref) is not None:
                         return all_got
+                    if self._has_not_found(got):
+                        raise NotFoundError(ref)
                     self.log.warning("submit attempt %d/%d for %s produced no matching response",
                                      attempt, SUBMIT_ATTEMPTS, ref)
+                except NotFoundError:
+                    raise
                 except Exception as exc:
                     self.log.warning("submit attempt %d/%d failed for %s: %s",
                                      attempt, SUBMIT_ATTEMPTS, ref, exc)
@@ -261,6 +276,8 @@ class GenericAdapter(CarrierAdapter):
             timeout_s=site.response_timeout_s,
             **kw,
         )
+        if self._has_not_found(got):
+            raise NotFoundError(ref)
         return all_got + got
 
     async def _before_submit(self, ref: str) -> None:
@@ -277,11 +294,18 @@ class GenericAdapter(CarrierAdapter):
             cands = [g for g in cands if _contains_ref(g.json, key)]
         return max(cands, key=lambda g: len(json.dumps(g.json)), default=None)   # richest match
 
+    def _has_not_found(self, got: list[CapturedResponse]) -> bool:
+        base = _site(urlparse(self.url or "").hostname or "")
+        return any(g.status == 404 and g.json is not None
+                   and _site(urlparse(g.url).hostname or "") == base for g in got)
+
     async def _raise_for_miss(self, got: list[CapturedResponse], ref: str) -> None:
         if any(g.status in (403, 429) for g in got) or await self.session.looks_blocked(self.spec.block_markers or None):
             raise BlockedError("carrier site blocked the request")
         base = _site(urlparse(self.url or "").hostname or "")
-        if any(g.status == 200 and g.json is not None and _site(urlparse(g.url).hostname or "") == base for g in got):
+        if self._has_not_found(got) or any(
+                g.status == 200 and g.json is not None and _site(urlparse(g.url).hostname or "") == base
+                for g in got):
             raise NotFoundError(ref)     # site answered with JSON, but none of it is about this reference
         raise TransientError("no JSON response captured (site may render HTML only: it needs a custom adapter)")
 

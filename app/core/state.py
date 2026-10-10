@@ -19,6 +19,12 @@ class StateStore:
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, run_id TEXT, client TEXT, carrier TEXT,
             bill_to TEXT, reference TEXT, reason TEXT, resolved INTEGER DEFAULT 0);
         """)
+        # Older local databases created this table before client was recorded.
+        # Add the nullable column in place, preserving queued interventions and state.
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(intervention)")}
+        if "client" not in columns:
+            self.db.execute("ALTER TABLE intervention ADD COLUMN client TEXT")
+            self.db.commit()
 
     def was_sent(self, key: str) -> bool:
         return self.db.execute("SELECT 1 FROM sent WHERE key=?", (key,)).fetchone() is not None

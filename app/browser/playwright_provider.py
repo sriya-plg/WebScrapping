@@ -10,7 +10,12 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from app.browser.base import DEFAULT_BLOCK_MARKERS, BrowserProvider, BrowserSession, CapturedResponse
+from app.browser.base import (
+    DEFAULT_BLOCK_MARKERS,
+    BrowserProvider,
+    BrowserSession,
+    CapturedResponse,
+)
 from app.settings import BrowserConfig
 
 
@@ -77,7 +82,10 @@ class _PWSession(BrowserSession):
         return self.page.locator(selector)
 
     async def goto(self, url):
-        await self.page.goto(url, wait_until="domcontentloaded")
+        # Carrier pages can stall before DOMContentLoaded while analytics or other
+        # third-party resources load. Wait for the document response to commit here;
+        # the adapter subsequently waits for the actual tracking form before use.
+        await self.page.goto(url, wait_until="commit")
         await asyncio.sleep(random.uniform(0.8, 2.2))
 
     async def fill(self, selector, value, human=True, frame=None):
