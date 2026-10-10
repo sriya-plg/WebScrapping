@@ -1,4 +1,4 @@
-# Everything shared by ALL Calix carriers. A carrier's own config.yaml overrides/extends this.
+# Everything shared by ALL Calix carriers. Each carrier's mapping.yaml overrides/extends defaults.
 name: Calix
 bill_to: [CALIX, "134034"]      # backend billTo codes handled by this folder
 defaults:

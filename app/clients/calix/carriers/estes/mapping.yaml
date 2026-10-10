@@ -1,28 +1,91 @@
-# Calix x Estes. Everything here is OPTIONAL: with no overrides the engine uses the backend trackingUrl,
-# auto-detects the search box + the JSON call, and auto-maps common fields.
-# Run `python scripts/probe.py calix estes <PRO>` and pin what you verified, so a site change can't silently re-map.
+# Calix x Estes Express (MyEstes shipment tracking)
+#
+# Public UI: textarea + yellow SEARCH. Guest tracking often shows HTML errors without
+# cloudapi JSON; not_found_markers avoids false TimeoutError when PROs are invalid.
+# Verify with a known-good 10-digit PRO: python scripts/probe.py calix estes <PRO> --headed
+
 aliases: [EXLA, ESTE03]
+
 browser:
   browser_mode: playwright_stealth
-  headless: true
+  headless: false
+
+limits:
+  max_concurrency: 1
+  min_delay_s: 4
+  max_delay_s: 11
+  retries: 3
+
 site:
-  # TODO: inspect Estes tracking page and replace all selector/pattern values.
-  input_selector: "TODO_REPLACE_TRACKING_INPUT"
-  submit_selector: "TODO_REPLACE_SEARCH_BUTTON"
+  tracking_url: https://www.estes-express.com/myestes/shipment-tracking/
+  input_selector: "textarea:visible"
+  submit_selector: 'button:has-text("SEARCH")'
+
   input_mode: multiline
   delimiter: "\n"
-  batch_size: 10
-  response_url_pattern: "TODO_REPLACE_TRACKING_API_PATTERN"
-  expected_response_shape: single_batch
-  response_pro_path: "TODO_REPLACE_JSON_PATH_TO_PRO"
+  # Max PRO lines entered in the textarea before one SEARCH click (Estes allows ~20).
+  batch_size: 20
+
+  response_url_pattern: '(?i)(myestes-api\.estes-express\.com/shipmenttracking/history|cloudapi\.estes-express\.com/v1/shipments|shipments/history)'
+  expected_response_shape: per_pro
+  response_pro_path: data[].pro
+
   strip_spaces_dashes: true
   strip_leading_zeros: false
-  response_timeout_s: 30
+
+  response_timeout_s: 25
   idle_window_s: 2
+  typing_delay_ms: 0
+  pre_submit_delay_s: 3
+  inter_batch_delay_s: 2
   action_min_delay_s: 0.5
   action_max_delay_s: 1.2
-# Optional login shape: {required: true, url: "TODO", selectors: {username: "TODO", password: "TODO", submit: "TODO", success: "TODO"}}
-# fields:                       # common field <- raw JSON path ("a.b|c.d" = first non-empty)
-#   status: "shipment.status"
-#   delivery_date: "shipment.deliveryDate"
-# status_map: {"proof of delivery": DELIVERED}   # only for statuses the built-in rules don't understand
+
+  extra:
+    # Per-carrier batch flow (see saia/estes mapping.yaml; BatchScraper reads site.extra only).
+    landing_settle_s: 3
+    pro_input_digits: 10
+    retry_missing_individually: false
+    batch_collect_all_responses: true
+    return_to_tracking_after_submit: true
+    response_match_loose_json: true
+    response_data_path: data
+    response_error_code_path: error.code
+    response_error_message_path: error.message
+    response_not_found_codes: [50010]
+    input_selector_fallbacks:
+      - 'textarea[placeholder*="tracking numbers" i]'
+      - '#trackingNumbers'
+    not_found_markers:
+      - "Not found or tracking information unavailable"
+    consent_selectors:
+      - "#onetrust-accept-btn-handler"
+      - "button:has-text('Accept')"
+
+  login: null
+
+mapping:
+  auto: true
+  fields:
+    reference: data.0.pro
+    status: data.0.status.expandedStatus|data.0.status.conciseStatus|shipment.status
+    pickup_date: data.0.pickupDate|shipment.pickupDate
+    delivery_date: data.0.deliveryDate|shipment.deliveryDate
+    eta: data.0.estimatedDelivery.endDate|shipment.eta
+    origin: data.0.shipper.address.city|shipment.origin
+    destination: data.0.consignee.address.city|shipment.destination
+    pieces: data.0.piecesCount|shipment.pieces
+    weight: data.0.totalWeight|shipment.weight
+  events:
+    path: data.0.movementHistory|history
+    fields:
+      timestamp: statusHistory.0.referenceDate|date
+      description: description
+      location: location.name|location
+      status: statusHistory.0.expandedStatus|status
+  status_map:
+    Delivered: DELIVERED
+    "Delivery Completed - OK": DELIVERED
+    "Out for Delivery": OUT_FOR_DELIVERY
+    "In Transit": IN_TRANSIT
+    "Picked Up": PICKED_UP

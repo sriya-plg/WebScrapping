@@ -62,7 +62,7 @@ class SiteConfig(_Strict):
     response_pro_path: str = "proNumber"
     input_mode: Literal["multiline", "delimited"] = "multiline"
     delimiter: str = "\n"
-    batch_size: int = 1
+    batch_size: int = 1  # mapping.yaml site.batch_size: PROs per tracking submit
     strip_spaces_dashes: bool = True
     strip_leading_zeros: bool = False
     action_min_delay_s: float = 0.4
@@ -161,6 +161,7 @@ class AlertSettings(_Strict):
 
 class AppSettings(_Strict):
     log_level: str = "INFO"
+    log_format: Literal["console", "json"] = "console"
     state_db: str = "state/tracker.db"
     state_dir: str = "state/browser"
     samples_dir: str = "state/samples"   # raw JSON saved when mapping fails / status unknown (to write mapping.yaml)

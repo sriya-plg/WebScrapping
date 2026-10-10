@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 
+from app.logging_setup import log
 from app.models import CarrierConfig, TrackingJob
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,8 @@ async def build_jobs(backend) -> dict[str, dict[str, list[TrackingJob]]]:
     scraper pacing, retries, and result processing.
     """
     configs = await backend.get_carrier_configs()
+    active = sum(1 for c in configs if c.is_active)
+    log(logger, logging.INFO, "carrier configurations loaded", total=len(configs), active=active)
     grouped: dict[str, dict[str, list[TrackingJob]]] = {}
     groups: dict[tuple[int, str], CarrierConfig] = {}
     for config in configs:
@@ -43,7 +46,8 @@ async def build_jobs(backend) -> dict[str, dict[str, list[TrackingJob]]]:
             seen.add(key)
             carrier_jobs.append(TrackingJob(carrier=config, shipment=shipment,
                                             search_by=search_by, search_value=value))
-        if skipped:
-            logger.info("shipment rows skipped", extra={"fields": {"bill_to": bill_to,
-                        "carrier_code": carrier_code, "skipped": skipped}})
+        log(logger, logging.INFO, "pending shipments loaded", bill_to=bill_to,
+            carrier_code=carrier_code, job_count=len(carrier_jobs), skipped=skipped)
+    total_jobs = sum(len(jobs) for carriers in grouped.values() for jobs in carriers.values())
+    log(logger, logging.INFO, "intake complete", carrier_groups=len(groups), tracking_jobs=total_jobs)
     return grouped

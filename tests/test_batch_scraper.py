@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from app.browser.base import BrowserProvider, BrowserSession, CapturedResponse
-from app.core.scraper import BatchScraper
+from app.core.scraper import BatchScraper, classify_carrier_raw
 from app.models import CarrierConfig, ShipmentRef, TrackingJob
 from app.settings import CarrierSpec
 
@@ -20,6 +20,7 @@ class MockSession(BrowserSession):
         self.inputs = []
         self.filled_values = {}
         self.typed_chunks = []
+        self.presses = []
         self.clicks = 0
         self.listener = False
         self.urls = []
@@ -28,6 +29,9 @@ class MockSession(BrowserSession):
 
     async def goto(self, url): self.urls.append(url)
     async def fill(self, selector, value, human=True, frame=None):
+        self.input_value = value
+        self.filled_values[selector] = value
+    async def set_input_value(self, selector, value, frame=None):
         self.input_value = value
         self.filled_values[selector] = value
     async def type_text(self, selector, text, delay_ms=0, clear=False, frame=None):
@@ -43,7 +47,12 @@ class MockSession(BrowserSession):
             self.inputs.append(self.input_value)
             if self.input_value in self.failures:
                 raise RuntimeError("mock click failed")
-    async def press(self, selector, key, frame=None): raise AssertionError("Enter must not be used")
+    async def press(self, selector, key, frame=None):
+        self.presses.append(key)
+        if key in ("Enter", "Return") and self.input_value and not self.input_value.endswith("\n"):
+            self.input_value += "\n"
+        elif key in ("Enter", "Return"):
+            self.input_value += "\n"
     async def select_option(self, selector, value, frame=None): pass
     async def wait_for_selector(self, selector, timeout_s=20, frame=None): return True
     async def is_visible(self, selector, frame=None): return selector in self.visible_selectors
@@ -129,6 +138,71 @@ def test_per_pro_collects_each_response_and_uses_saved_fixture(tmp_path):
     assert result.missing == [], (result.errors, session.inputs, spec.site.response_url_pattern)
     assert result.received["000123"] == fixture
     assert result.received["4"] == second
+
+
+def test_classify_estes_not_found_payload():
+    spec = make_spec("per_pro", batch_size=1)
+    spec.site.extra = {
+        "response_data_path": "data",
+        "response_error_code_path": "error.code",
+        "response_error_message_path": "error.message",
+        "response_not_found_codes": [50010],
+    }
+    raw = {"data": [], "error": {"code": 50010, "message": "Not found.", "details": ""}}
+    outcome, summary = classify_carrier_raw(raw, spec)
+    assert outcome == "not_found"
+    assert summary["error_message"] == "Not found."
+    assert summary["data_count"] == 0
+
+
+def test_estes_not_found_json_still_received(tmp_path):
+    url = "https://myestes-api.estes-express.com/shipmenttracking/history?pro=1848508033"
+    body = {"data": [], "error": {"code": 50010, "message": "Not found.", "details": ""}}
+    session = MockSession({"1848508033": [CapturedResponse(url, 200, body)]})
+    spec = make_spec("per_pro", batch_size=1)
+    spec.site.response_url_pattern = "myestes-api"
+    spec.site.response_pro_path = "data[].pro"
+    spec.site.strip_spaces_dashes = True
+    spec.site.extra = {
+        "retry_missing_individually": False,
+        "response_data_path": "data",
+        "response_error_code_path": "error.code",
+        "response_error_message_path": "error.message",
+        "response_not_found_codes": [50010],
+    }
+    result = asyncio.run(BatchScraper(MockProvider(session), spec, str(tmp_path)).run_batch(
+        make_jobs(["184-8508033"]), spec))
+    assert result.missing == []
+    assert result.outcomes["184-8508033"] == "not_found"
+    assert result.received["184-8508033"] == body
+
+
+def test_url_query_pro_maps_response_without_json_path(tmp_path):
+    url = "https://myestes-api.estes-express.com/shipmenttracking/history?pro=1848508033"
+    body = {"status": "In Transit", "reference": "1848508033"}
+    session = MockSession({"1848508033": [CapturedResponse(url, 200, body)]})
+    spec = make_spec("per_pro", batch_size=1)
+    spec.site.response_url_pattern = "myestes-api"
+    spec.site.response_pro_path = "data[].pro"
+    spec.site.strip_spaces_dashes = True
+    spec.site.extra = {"retry_missing_individually": False}
+    result = asyncio.run(BatchScraper(MockProvider(session), spec, str(tmp_path)).run_batch(
+        make_jobs(["184-8508033"]), spec))
+    assert result.missing == []
+    assert "184-8508033" in result.received
+    assert result.received["184-8508033"] == body
+    assert result.scrape_items()[0]["search_value"] == "184-8508033"
+
+
+def test_retry_missing_disabled_leaves_pros_in_missing(tmp_path):
+    session = MockSession({"1\n2": [response(by_input("1"))]})
+    spec = make_spec("single_batch")
+    spec.site.extra = {"retry_missing_individually": False}
+    result = asyncio.run(BatchScraper(MockProvider(session), spec, str(tmp_path)).run_batch(
+        make_jobs(["1", "2"]), spec))
+    assert "1" in result.received
+    assert result.missing == ["2"]
+    assert session.inputs == ["1\n2"]
 
 
 def test_missing_pro_retried_individually(tmp_path):
@@ -276,16 +350,52 @@ def test_login_mfa_challenge_detected_from_dom(tmp_path):
     assert any("MFAChallengeError" in err.get("type", "") for err in result.errors)
 
 
-def test_gradual_entry_saia_multiline_timing(tmp_path):
+def test_saia_root_array_maps_each_pro(tmp_path):
+    pros = ["771043317403", "771045181604"]
+    payload = [
+        {"referenceNumbers": {"proNumber": "771043317403"}, "shipment": {"status": "In Transit"}},
+        {"referenceNumbers": {"proNumber": "771045181604"}, "shipment": {"status": "Delivered"}},
+    ]
+    entered = "\n".join(["77104331740", "77104518160"])
+    session = MockSession(
+        {entered: [CapturedResponse("https://www.saia.com/api/v1/tracking/find-by-pro-number", 200, payload)]}
+    )
+    spec = make_spec("single_batch", batch_size=2)
+    spec.site.response_url_pattern = "find-by-pro-number"
+    spec.site.response_pro_path = "[].referenceNumbers.proNumber"
+    spec.site.extra = {"pro_input_digits": 11, "retry_missing_individually": False}
+    result = asyncio.run(BatchScraper(MockProvider(session), spec, str(tmp_path)).run_batch(
+        make_jobs(pros), spec))
+    assert result.missing == []
+    assert len(result.received) == 2
+    assert result.received["771043317403"]["shipment"]["status"] == "In Transit"
+    assert result.outcomes["771043317403"] == "found"
+
+
+def test_saia_empty_array_records_not_found_per_pro(tmp_path):
+    session = MockSession(
+        {"77104331740": [CapturedResponse("https://www.saia.com/api/v1/tracking/find-by-pro-number", 200, [])]}
+    )
+    spec = make_spec("single_batch", batch_size=1)
+    spec.site.response_url_pattern = "find-by-pro-number"
+    spec.site.response_pro_path = "[].referenceNumbers.proNumber"
+    spec.site.extra = {"pro_input_digits": 11, "retry_missing_individually": False}
+    result = asyncio.run(BatchScraper(MockProvider(session), spec, str(tmp_path)).run_batch(
+        make_jobs(["771043317403"]), spec))
+    assert result.missing == []
+    assert result.received["771043317403"] == []
+    assert result.outcomes["771043317403"] == "not_found"
+
+
+def test_multiline_saia_bulk_entry_and_eleven_digit_pros(tmp_path):
     pro_list = ["771043317403", "771045181604", "771045854802"]
-    expected_multiline = "\n".join(pro_list)
+    expected_multiline = "\n".join(["77104331740", "77104518160", "77104585480"])
 
     session = MockSession({expected_multiline: [response(by_input(expected_multiline))]})
     spec = make_spec("single_batch", batch_size=3)
     spec.site.input_mode = "multiline"
     spec.site.delimiter = "\n"
-    spec.site.typing_delay_ms = 25
-    spec.site.inter_pro_delay_s = 0.05
+    spec.site.extra = {"pro_input_digits": 11}
     spec.site.pre_submit_delay_s = 0.05
 
     result = asyncio.run(BatchScraper(MockProvider(session), spec, str(tmp_path)).run_batch(
@@ -293,11 +403,8 @@ def test_gradual_entry_saia_multiline_timing(tmp_path):
 
     assert result.missing == []
     assert len(result.received) == 3
-    # Check typing chunks
-    assert session.typed_chunks[0] == ("", 0, True)  # Initial clear
-    # Verify exact sequential entries
-    typed_texts = [text for text, delay, clear in session.typed_chunks if text]
-    assert typed_texts == ["771043317403", "\n", "771045181604", "\n", "771045854802"]
+    assert session.typed_chunks == []
+    assert session.presses == []
     assert session.input_value == expected_multiline
 
 

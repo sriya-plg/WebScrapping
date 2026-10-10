@@ -31,7 +31,7 @@ async def _apply_stealth(context) -> None:
 _DISCOVER_JS = r"""() => {
   const vis = el => { const r = el.getBoundingClientRect(), s = getComputedStyle(el);
                       return r.width > 20 && r.height > 10 && s.visibility !== 'hidden' && s.display !== 'none'; };
-  const kw = /(\bpro\b|bol|track|search|number|reference|shipment|waybill|housebill|bill of lading)/i;
+  const kw = /(\bpro\b|bol|track|search|number|reference|shipment|waybill|housebill|bill of lading|tracking numbers)/i;
   const css = el => {
     if (el.id) return '#' + CSS.escape(el.id);
     for (const a of ['name', 'data-testid', 'data-test', 'aria-label', 'placeholder']) {
@@ -74,7 +74,7 @@ class _PWSession(BrowserSession):
     def _target(self, selector: str, frame: str | None = None):
         if frame:
             return self.page.frame_locator(frame).locator(selector)
-        return self.page.locator(selector)
+        return self.page.locator(selector).first
 
     async def goto(self, url):
         await self.page.goto(url, wait_until="domcontentloaded")
@@ -122,6 +122,29 @@ class _PWSession(BrowserSession):
         except Exception:
             return ""
 
+    async def set_input_value(self, selector, value, frame=None):
+        """Set textarea/input value and notify React/Vue controlled components."""
+        target = self._target(selector, frame).first
+        await target.click()
+
+        async def _apply() -> None:
+            await target.evaluate(
+                """(el, v) => {
+                    el.focus();
+                    el.value = v;
+                    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }""",
+                value,
+            )
+
+        norm = lambda t: (t or "").replace("\r\n", "\n")
+        await _apply()
+        if norm(await target.input_value()) != norm(value):
+            await target.fill(value)
+        if norm(await target.input_value()) != norm(value):
+            await _apply()
+
     async def click(self, selector, frame=None):
         await asyncio.sleep(random.uniform(0.3, 0.9))
         target = self._target(selector, frame).first
@@ -132,15 +155,40 @@ class _PWSession(BrowserSession):
         target = self._target(selector, frame).first
         await target.press(key)
 
+    async def wait_ready(self, submit_selector: str | None, timeout_s: float = 10) -> None:
+        """Wait until submit control is visible and enabled (Angular forms e.g. Estes)."""
+        if not submit_selector:
+            return
+        target = self.page.locator(submit_selector).first
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                if await target.is_visible() and await target.is_enabled():
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+
     async def select_option(self, selector, value, frame=None):
         target = self._target(selector, frame).first
         await target.select_option(value)
 
     async def wait_for_selector(self, selector, timeout_s=20, frame=None):
         try:
-            target = self._target(selector, frame).first
-            await target.wait_for(state="attached", timeout=timeout_s * 1000)
-            return True
+            root = self.page.frame_locator(frame) if frame else self.page
+            target = root.locator(selector)
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                count = await target.count()
+                for index in range(count):
+                    item = target.nth(index)
+                    try:
+                        if await item.is_visible():
+                            return True
+                    except Exception:
+                        continue
+                await asyncio.sleep(0.25)
+            return False
         except Exception:
             return False
 

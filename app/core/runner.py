@@ -11,6 +11,7 @@ from app.core.intake import build_jobs
 from app.core.job import AccountJob, CarrierGuard, RunContext, Services, label
 from app.core.metrics import RunMetrics
 from app.core.resilience import CircuitBreaker, Pacer, retry
+from app.core.batch_updates import enqueue_tracking_updates
 from app.core.scraper import BatchScraper
 from app.logging_setup import carrier_var, client_var, log, register_secret, run_id_var
 from app.models import CarrierAccount
@@ -123,17 +124,30 @@ class Runner:
                 return
             if only_clients and spec.client.upper() not in only_clients and str(bill_to).upper() not in only_clients:
                 return
+            client_var.set(spec.client)
+            carrier_var.set(spec.code)
             provider = self.sv.provider_factory(spec.browser, self.sv.settings.state_dir)
             try:
                 outcome = await BatchScraper(provider, spec, self.sv.settings.debug_dir).run_batch(jobs, spec)
+                await enqueue_tracking_updates(
+                    self.sv.settings, self.sv.backend, config, spec, run_id_var.get() or "", outcome)
                 self.last_results.append({"client": spec.client, "carrier": spec.code,
                                           "bill_to": bill_to, "result": outcome})
                 label_key = f"{spec.client}/{spec.code}"
-                summary[label_key] = {"requested": len(outcome.requested), "received": len(outcome.received),
-                                      "missing": len(outcome.missing), "errors": len(outcome.errors)}
+                found_n = sum(1 for o in outcome.outcomes.values() if o == "found")
+                not_found_n = sum(1 for o in outcome.outcomes.values() if o == "not_found")
+                summary[label_key] = {
+                    "requested": len(outcome.requested),
+                    "received": len(outcome.received),
+                    "found": found_n,
+                    "not_found": not_found_n,
+                    "missing": len(outcome.missing),
+                    "errors": len(outcome.errors),
+                }
                 log(logger, logging.INFO, "carrier batch complete", client=spec.client,
                     carrier_code=spec.code, bill_to=bill_to, requested=len(outcome.requested),
-                    received=len(outcome.received), missing=len(outcome.missing), failures=len(outcome.errors))
+                    received=len(outcome.received), found=found_n, not_found=not_found_n,
+                    missing=len(outcome.missing), failures=len(outcome.errors))
             finally:
                 try:
                     await provider.close()

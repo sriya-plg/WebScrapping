@@ -1,59 +1,88 @@
-# Calix x Saia. Needs adapter.py for Cloudflare and reCAPTCHA handling; mapping works like any other carrier.
+# Calix x Saia
+#
+# client.yaml (Calix folder)
+#   billTo codes, pending API shape, payload_map -> Pegasus/backend field names
+#
+# mapping.yaml (this file)
+#   mapping.*     : carrier JSON -> common TrackingResult (used when posting results)
+#   site.*        : how BatchScraper drives saia.com (selectors, network pattern, login)
+#   browser/limits: automation profile (not hardcoded in Python; per-carrier overrides)
+#
+# adapter.py      : optional; Cloudflare wait + reCAPTCHA on the AccountJob/adapter path only.
+#                   HTTP run-once today uses BatchScraper + site.* below (not adapter.py).
+
 aliases: [SAIA_LTL, SAI001]
+
 browser:
-  provider: patchright         # undetected-first; fall back to crawl4ai only if this gets blocked
   browser_mode: patchright
-  headless: false              # run under xvfb on a server; headed passes Cloudflare far more often
+  headless: false
   channel: chrome
-limits: {max_concurrency: 1, min_delay_s: 8, max_delay_s: 20, retries: 2, breaker_threshold: 3, breaker_cooldown_s: 3600}
-block_markers: ["just a moment", "verify you are human", "attention required"]
+
+limits:
+  max_concurrency: 1
+  min_delay_s: 8
+  max_delay_s: 20
+  retries: 2
+  breaker_threshold: 3
+  breaker_cooldown_s: 3600
+
+block_markers:
+  - just a moment
+  - verify you are human
+  - attention required
+
 site:
+  tracking_url: https://www.saia.com/track
   challenge_wait_s: 60
-  tracking_url: "https://www.saia.com/track"
-  # TODO: confirm selectors and response contract against the live site.
+
   input_selector: "#trackingNumbers"
   submit_selector: 'button[aria-label="Track your shipment now"]'
   input_mode: multiline
   delimiter: "\n"
-  batch_size: 10
-  response_url_pattern: "/api/v1/tracking/find-by-pro-number"
+  batch_size: 30
+
+  response_url_pattern: /api/v1/tracking/find-by-pro-number
   expected_response_shape: single_batch
-  response_pro_path: "[0].referenceNumbers.proNumber"
+  response_pro_path: "[].referenceNumbers.proNumber"
   strip_spaces_dashes: true
-  strip_leading_zeros: false
+  extra:
+    # Saia UI: enter 11-digit PROs (drop the 12th check digit from the backend value).
+    pro_input_digits: 11
+    # Batch-only search (same knobs as Estes; per-carrier in mapping.yaml, not global Python).
+    retry_missing_individually: false
+    return_to_tracking_after_submit: true
+    batch_collect_all_responses: true
+    single_batch_item_pro_path: referenceNumbers.proNumber
+
   response_timeout_s: 45
   idle_window_s: 2
-  action_min_delay_s: 1
-  action_max_delay_s: 2
-  typing_delay_ms: 25
-  inter_pro_delay_s: 0.5
+  typing_delay_ms: 0
+  inter_pro_delay_s: 0
   pre_submit_delay_s: 1.0
   inter_batch_delay_s: 2.0
-  # Public tracking does not require login. Selectors below are for optional customer portal login.
-  # Login remains disabled by default until authenticated credentials and post-login selectors are verified.
+
   login:
     enabled: false
     required: false
-    url: "https://www.saia.com/track"
+    url: https://www.saia.com/track
     open_selector: 'a[aria-label="Log in"]'
     selectors:
       username: "#loginUsername"
       password: "#loginPassword"
       submit: "form button[type='submit']:has-text('LOGIN')"
-      success: "TODO_REPLACE_LOGGED_IN_SELECTOR # Unverified: Requires live authenticated credentials"
-  match_ref: true
+      success: "TODO_REPLACE_LOGGED_IN_SELECTOR"
 
-fields:
-  reference: "[0].referenceNumbers.proNumber"
-  status: "[0].shipment.status"
-  pickup_date: "[0].shipment.pickupDate"
-  delivery_date: "[0].delivery.deliveredDate"
-  eta: "[0].delivery.expectedDate"
-  origin: "[0].shipper.companyName"
-  destination: "[0].consignee.companyName"
-
-status_map:
-  "Delivered": "DELIVERED"
-  "In Transit": "IN_TRANSIT"
-  "Out for Delivery": "OUT_FOR_DELIVERY"
-  "Picked Up": "PICKED_UP"
+mapping:
+  fields:
+    reference: "[0].referenceNumbers.proNumber"
+    status: "[0].shipment.status"
+    pickup_date: "[0].shipment.pickupDate"
+    delivery_date: "[0].delivery.deliveredDate"
+    eta: "[0].delivery.expectedDate"
+    origin: "[0].shipper.companyName"
+    destination: "[0].consignee.companyName"
+  status_map:
+    Delivered: DELIVERED
+    In Transit: IN_TRANSIT
+    Out for Delivery: OUT_FOR_DELIVERY
+    Picked Up: PICKED_UP
