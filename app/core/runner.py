@@ -26,13 +26,13 @@ class Runner:
         g = self._guards.setdefault(spec.code, CarrierGuard(Pacer(L.max_concurrency, L.min_delay_s, L.max_delay_s),
                                                             CircuitBreaker(L.breaker_threshold, L.breaker_cooldown_s),
                                                             asyncio.Lock()))
-        if a.processing_delay:                        # backend-driven pacing floor
+        if a.processing_delay and not a.from_carrier_configuration:  # legacy backend-driven pacing floor
             g.pacer.min_delay = max(L.min_delay_s, a.processing_delay)
             g.pacer.max_delay = max(L.max_delay_s, a.processing_delay * 2)
         return g
 
     def _due(self, spec: CarrierSpec, a: CarrierAccount) -> bool:
-        if not a.processing_frequency:
+        if a.from_carrier_configuration or not a.processing_frequency:
             return True
         last = float(self.sv.store.kv_get(f"last:{spec.client}:{spec.code}:{a.bill_to}") or 0)
         tol = self.sv.settings.schedule.jitter_minutes * 60    # a jittered tick may arrive early by up to the jitter
@@ -40,11 +40,24 @@ class Runner:
 
     async def run_once(self, only: set[str] | None = None, force: bool = False,
                        only_clients: set[str] | None = None) -> dict:
+        if getattr(self, "_running", False):
+            log(logger, logging.WARNING, "run skipped because a previous run is still active")
+            return {}
+        self._running = True
+        try:
+            return await self._run_once(only, force, only_clients)
+        finally:
+            self._running = False
+
+    async def _run_once(self, only: set[str] | None, force: bool,
+                        only_clients: set[str] | None) -> dict:
         ctx = RunContext(run_id=uuid.uuid4().hex[:12], metrics=RunMetrics())
         run_id_var.set(ctx.run_id)
         t0, m = time.time(), ctx.metrics
+        log(logger, logging.INFO, "run started", run_id=ctx.run_id)
         accounts = await retry(self.sv.backend.get_carrier_accounts, attempts=3, base=2, cap=30,
                                retry_on=(Exception,))
+        log(logger, logging.INFO, "carrier accounts loaded", count=len(accounts), run_id=ctx.run_id)
         jobs: list[tuple[CarrierSpec, CarrierAccount]] = []
         for a in accounts:
             if a.password:

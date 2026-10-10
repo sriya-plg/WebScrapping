@@ -12,3 +12,12 @@ backend:
   post_path: /tracking/bulk
   stub_dir: stub
   outbox_dir: out
+carrier_configuration:
+  enabled: false                 # enable explicitly for the live carrier configuration API
+  base_url: https://plgtst.pegasuslogistics.com/api/orderentry
+  configurations_path: /GetCarrierConfigurationDetails
+  shipments_path: /GetCarrierShipmentDetails
+  shipments_method: GET
+  shipments_get_json_body: true   # supplied contract implies GET + JSON body; confirm with API owner
+  timeout_s: 30
+  retries: 3

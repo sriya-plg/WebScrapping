@@ -25,6 +25,12 @@ class CarrierAccount(BaseModel):
     password: SecretStr | None = None
     is_active: bool = Field(True, alias="isActive")
     total_count: int | None = Field(None, alias="totalCount")
+    from_carrier_configuration: bool = Field(False, exclude=True)
+
+    @field_validator("bill_to", "carrier_code", mode="before")
+    @classmethod
+    def _identifiers_as_strings(cls, value):
+        return str(value) if value is not None else value
 
 
 class PendingRef(BaseModel):

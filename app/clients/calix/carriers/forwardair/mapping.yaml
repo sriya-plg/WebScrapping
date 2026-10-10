@@ -1,5 +1,5 @@
 # Calix x Forward Air.
-aliases: [FWDA]
+aliases: [FWDA, FORW-LTL]
 browser:
   provider: patchright
   headless: false

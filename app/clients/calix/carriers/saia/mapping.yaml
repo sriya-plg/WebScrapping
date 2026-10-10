@@ -1,5 +1,5 @@
 # Calix x Saia. Needs adapter.py for Cloudflare and reCAPTCHA handling; mapping works like any other carrier.
-aliases: [SAIA_LTL]
+aliases: [SAIA_LTL, SAI001]
 browser:
   provider: patchright         # undetected-first; fall back to crawl4ai only if this gets blocked
   headless: false              # run under xvfb on a server; headed passes Cloudflare far more often

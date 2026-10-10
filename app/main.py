@@ -7,9 +7,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import time
-
 from app.backend.client import make_backend
+from app.backend.apis import CarrierConfigurationBackend
 from app.browser.factory import make_provider
 from app.core import registry
 from app.core.adapter import session_key
@@ -26,13 +27,18 @@ logger = logging.getLogger("main")
 
 def build(args):
     s = load_settings(args.config)
+    if os.environ.get("CARRIER_CONFIGURATION_API_BASE_URL"):
+        s.carrier_configuration.base_url = os.environ["CARRIER_CONFIGURATION_API_BASE_URL"]
     s.dry_run = s.dry_run or getattr(args, "dry_run", False)
     setup_logging(s.log_level)
     for e in registry.discover():
         logger.error("adapter import failed: %s", e)
     store = StateStore(s.state_db)
     resolver = load_resolver(s.clients_dir)
-    sv = Services(s, make_backend(s.backend), store, InterventionQueue(store, s.alerts), make_provider)
+    backend = make_backend(s.backend)
+    if s.carrier_configuration.enabled:
+        backend = CarrierConfigurationBackend(s.carrier_configuration, backend)
+    sv = Services(s, backend, store, InterventionQueue(store, s.alerts), make_provider)
     return s, sv, resolver, Runner(sv, resolver)
 
 
@@ -62,14 +68,19 @@ async def daemon(s, runner, store):
     anchor = float(store.kv_get("schedule_anchor") or 0) or time.time()
     store.kv_set("schedule_anchor", str(anchor))
     sched = JitterSchedule(anchor, cfg.interval_minutes * 60, cfg.jitter_minutes * 60, cfg.seed)
-    while True:
-        at = sched.next_after(time.time())
-        logger.info("next run at %s", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(at)))
-        await asyncio.sleep(max(0, at - time.time()))
-        try:
-            await runner.run_once()
-        except Exception:
-            logger.exception("run crashed; daemon continues")
+    try:
+        while True:
+            at = sched.next_after(time.time())
+            logger.info("next run at %s", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(at)))
+            await asyncio.sleep(max(0, at - time.time()))
+            try:
+                await runner.run_once()
+            except Exception:
+                logger.exception("run crashed; daemon continues")
+    finally:
+        close = getattr(runner.sv.backend, "close", None)
+        if close:
+            await close()
 
 
 def main():
@@ -88,8 +99,15 @@ def main():
     args = ap.parse_args()
     s, sv, resolver, runner = build(args)
     if args.cmd == "run-once":
-        asyncio.run(runner.run_once({c.upper() for c in args.carrier} if args.carrier else None, args.force,
-                                    {c.upper() for c in args.client} if args.client else None))
+        async def run_once():
+            try:
+                await runner.run_once({c.upper() for c in args.carrier} if args.carrier else None, args.force,
+                                      {c.upper() for c in args.client} if args.client else None)
+            finally:
+                close = getattr(sv.backend, "close", None)
+                if close:
+                    await close()
+        asyncio.run(run_once())
     elif args.cmd == "daemon":
         asyncio.run(daemon(s, runner, sv.store))
     else:

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 logger = logging.getLogger(__name__)
 COMMON_FIELDS = {"reference", "status", "pickup_date", "delivery_date", "eta", "origin", "destination", "pieces", "weight"}
@@ -108,6 +108,18 @@ class BackendSettings(_Strict):
     outbox_dir: str = "out"
 
 
+class CarrierConfigurationSettings(_Strict):
+    """Optional carrier and shipment input source; output uses the configured backend."""
+    enabled: bool = False
+    base_url: str = "https://plgtst.pegasuslogistics.com/api/orderentry"
+    configurations_path: str = "/GetCarrierConfigurationDetails"
+    shipments_path: str = "/GetCarrierShipmentDetails"
+    shipments_method: Literal["GET", "POST"] = "GET"
+    shipments_get_json_body: bool = True
+    timeout_s: float = 30
+    retries: int = 3
+
+
 class ScheduleSettings(_Strict):
     interval_minutes: int = 360
     jitter_minutes: int = 25
@@ -126,6 +138,7 @@ class AppSettings(_Strict):
     samples_dir: str = "state/samples"   # raw JSON saved when mapping fails / status unknown (to write mapping.yaml)
     clients_dir: str = "app/clients"
     backend: BackendSettings = BackendSettings()
+    carrier_configuration: CarrierConfigurationSettings = CarrierConfigurationSettings()
     schedule: ScheduleSettings = ScheduleSettings()
     alerts: AlertSettings = AlertSettings()
     dry_run: bool = False
