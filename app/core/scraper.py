@@ -62,19 +62,24 @@ def classify_carrier_raw(raw: Any, spec: CarrierSpec) -> tuple[CaptureOutcome, d
     not_found_codes = {str(c) for c in (extra.get("response_not_found_codes") or [])}
 
     if isinstance(raw, list):
-        summary["data_count"] = len(raw)
+        summary: dict[str, Any] = {"data_count": len(raw)}
         if not raw:
             return "not_found", summary
+        return "found", summary
     if isinstance(raw, dict) and "." not in data_path and data_path in raw:
         data_val = raw[data_path]
     else:
         data_val = get_path(raw, data_path, default=None)
     err_msg = get_path(raw, err_msg_path)
     err_code = get_path(raw, err_code_path)
-    summary: dict[str, Any] = {
+    summary = {
         "error_code": err_code,
         "error_message": err_msg,
     }
+    if isinstance(raw, dict) and not (err_msg or err_code is not None):
+        if get_path(raw, "shipment") is not None or get_path(raw, "referenceNumbers") is not None:
+            summary["data_count"] = 1
+            return "found", summary
     if isinstance(data_val, list):
         summary["data_count"] = len(data_val)
         if data_val:
