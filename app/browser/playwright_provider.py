@@ -146,7 +146,12 @@ class _PWSession(BrowserSession):
         timeout_s=30,
         settle_s=1.0,
         until=None,
+        enabled=True,
     ):
+        if not enabled:
+            await action()
+            return []
+
         found: list[CapturedResponse] = []
         tasks: list[asyncio.Task] = []
         last = [time.monotonic()]

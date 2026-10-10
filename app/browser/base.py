@@ -39,9 +39,11 @@ class BrowserSession(ABC):
         """Best-guess {"input": css, "submit": css|None} for the page's main search/tracking box."""
     @abstractmethod
     async def capture_all(self, action: Callable[[], Awaitable[Any]], timeout_s: float = 30, settle_s: float = 1.0,
-                          until: Callable[[list[CapturedResponse]], bool] | None = None) -> list[CapturedResponse]:
+                          until: Callable[[list[CapturedResponse]], bool] | None = None,
+                          enabled: bool = True) -> list[CapturedResponse]:
         """Run `action`; return every JSON response the browser received meanwhile. Stops early once
-        `until(responses)` is true (then waits `settle_s`), else after `settle_s` of silence, else at timeout."""
+        `until(responses)` is true (then waits `settle_s`), else after `settle_s` of silence, else at timeout.
+        If enabled is False, runs action without attaching response listeners."""
     @abstractmethod
     async def looks_blocked(self, markers: list[str] | None = None) -> bool: ...
     @abstractmethod

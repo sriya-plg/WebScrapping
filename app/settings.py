@@ -61,6 +61,7 @@ class SiteConfig(_Strict):
     transport: Literal["browser", "http"] = "browser"
     http_url_template: str | None = None  # transport=http: e.g. https://host/api/track/{ref}
     match_ref: bool = True               # require the captured JSON to contain the reference we searched
+    capture_network: bool = False        # default false: only sniff network responses when explicitly enabled
     response_timeout_s: float = 30
     settle_s: float = 1.0
     challenge_wait_s: float = 60
@@ -92,6 +93,7 @@ class CarrierSpec(_Strict):
     limits: Limits = Limits()
     block_markers: list[str] = []
     site: SiteConfig = SiteConfig()
+    scraping: dict[str, Any] = {}
     mapping: MappingConfig = MappingConfig()
     pending: dict[str, Any] = {}         # client-level: how to call/parse the pending-refs API
     payload_map: dict[str, str] = {}     # client-level: common schema -> backend payload keys

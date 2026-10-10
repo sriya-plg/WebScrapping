@@ -160,6 +160,18 @@ class GenericAdapter(CarrierAdapter):
                                              self.url)
         self._sel = {"input": found["input"], "submit": s.submit_selector or found.get("submit"), "source": "auto"}
 
+    def _should_capture_network(self) -> bool:
+        if not self.spec.site.capture_network:
+            return False
+        strat = getattr(self.spec, "scraping", {}).get("strategy")
+        if strat == "scrapling":
+            return False
+        return True
+
+    def extract(self, html: str, ref: str, ref_type: str) -> dict:
+        """Extract shipment data from page HTML without network responses."""
+        return {}
+
     # ------------------------------------------------------------------ tracking
     async def track(self, ref: str, ref_type: str) -> dict:
         if self.spec.site.transport == "http":
@@ -168,6 +180,14 @@ class GenericAdapter(CarrierAdapter):
         async with self.io_lock:
             for attempt in (1, 2):
                 got = await self._search(ref, ref_type)
+                if not self._should_capture_network():
+                    html = await self.session.content() if hasattr(self.session, "content") else ""
+                    data = self.extract(html, ref, ref_type)
+                    if data:
+                        return data
+                    if attempt == 2:
+                        raise TransientError(f"no shipment data extracted from page for {ref}")
+                    continue
                 hit = self._pick(got, ref)
                 if hit:
                     if self._sel["source"] == "auto" and self.cache:     # remember what worked
@@ -219,9 +239,20 @@ class GenericAdapter(CarrierAdapter):
         # bootstrapped and the submit button is enabled, otherwise the click is silently ignored.
         await self._wait_ready(sel.get("submit"))
 
+        capture_enabled = self._should_capture_network()
+        if not capture_enabled:
+            await s.fill(sel["input"], ref)
+            await self._before_submit(ref)
+            if sel.get("submit"):
+                await s.click(sel["submit"])
+            else:
+                await s.press(sel["input"], "Enter")
+            return []
+
         kw = dict(
             settle_s=site.settle_s,
             until=lambda rs: self._pick(rs, ref) is not None or self._has_not_found(rs),
+            enabled=True,
         )
 
         # Keep every response seen across attempts so _raise_for_miss can diagnose properly

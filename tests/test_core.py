@@ -60,6 +60,7 @@ async def test_carrier_json_404_is_not_found_without_submit_retries():
 
     spec = load_resolver(ROOT / "app/clients").resolve("CALIX", "ESTES")
     spec.site.input_selector, spec.site.submit_selector = "#pro", "#submit"
+    spec.site.capture_network = True
     account = CarrierAccount(id=1, carrierName="Estes", carrierCode="ESTES", billTo="CALIX",
                              trackingUrl="https://www.estes-express.com/myestes/shipment-tracking/")
     adapter = GenericAdapter(spec, account, None)
@@ -71,6 +72,60 @@ async def test_carrier_json_404_is_not_found_without_submit_retries():
     with pytest.raises(NotFoundError):
         await adapter._search("0000000000", "PRO")
     assert session.captures == 1
+
+
+async def test_scrapling_carrier_never_reads_network_responses():
+    from app.browser.playwright_provider import _PWSession
+    from app.core.adapter import GenericAdapter
+
+    # 1. Verify GenericAdapter._search never calls session.capture_all when strategy is scrapling
+    class MockSession:
+        capture_calls = 0
+        async def wait_for_selector(self, *args, **kwargs): return True
+        async def fill(self, *args, **kwargs): pass
+        async def click(self, *args, **kwargs): pass
+        async def capture_all(self, action, **kwargs):
+            self.capture_calls += 1
+            await action()
+            return []
+
+    spec = load_resolver(ROOT / "app/clients").resolve("CALIX", "ESTES")
+    spec.site.input_selector, spec.site.submit_selector = "#pro", "#submit"
+    spec.site.capture_network = False
+    spec.scraping = {"strategy": "scrapling"}
+
+    account = CarrierAccount(id=1, carrierName="Estes", carrierCode="ESTES", billTo="CALIX",
+                             trackingUrl="https://www.estes-express.com/myestes/shipment-tracking/")
+    adapter = GenericAdapter(spec, account, None)
+    session = MockSession()
+    adapter.session = session
+    adapter._sel = {"input": "#pro", "submit": "#submit", "source": "config"}
+    async def no_wait(_): pass
+    adapter._wait_ready = no_wait
+
+    got = await adapter._search("1234567890", "PRO")
+    assert got == []
+    assert session.capture_calls == 0
+
+    # 2. Verify _PWSession with enabled=False does not attach response listeners to the page
+    listeners = []
+    class FakePage:
+        def set_default_timeout(self, _): pass
+        def on(self, event, cb):
+            listeners.append((event, cb))
+        def remove_listener(self, event, cb):
+            pass
+
+    pw_session = _PWSession(None, FakePage(), None, 30)
+    action_called = False
+    async def action():
+        nonlocal action_called
+        action_called = True
+
+    res = await pw_session.capture_all(action, enabled=False)
+    assert res == []
+    assert action_called is True
+    assert len(listeners) == 0
 
 
 def test_get_path_fallbacks():
