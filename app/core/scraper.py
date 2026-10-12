@@ -310,6 +310,14 @@ class BatchScraper:
         pros = [format_pro_for_input(job.search_value, spec) for job in chunk]
         separator = "\n" if site.input_mode == "multiline" else site.delimiter
         expected_text = separator.join(pros)
+        extra = site.extra or {}
+        if extra.get("tag_input_enter"):
+            for index, pro in enumerate(pros):
+                await session.fill(selector, pro, human=False)
+                await session.press(selector, "Enter")
+                if index + 1 < len(pros) and site.inter_pro_delay_s > 0:
+                    await asyncio.sleep(site.inter_pro_delay_s)
+            return expected_text
         gradual = site.typing_delay_ms > 0 or site.inter_pro_delay_s > 0
 
         if site.input_mode == "multiline":
@@ -481,7 +489,8 @@ class BatchScraper:
             raise ChallengeError("carrier challenge detected")
         input_sel, submit_sel = await self._resolve_tracking_selectors(session, spec)
         expected_text = await self._fill_tracking_input(session, site, chunk, spec, input_sel)
-        await self._verify_tracking_input(session, input_sel, expected_text, chunk)
+        if not (site.extra or {}).get("skip_tracking_input_verify"):
+            await self._verify_tracking_input(session, input_sel, expected_text, chunk)
 
         wait_ready = getattr(session, "wait_ready", None)
         if wait_ready is not None and submit_sel:
@@ -510,7 +519,16 @@ class BatchScraper:
                 found.update(self._pro_keys_from_response(response, spec, keys, site))
             return set(keys).issubset(found)
 
-        responses = await session.capture_all(lambda: session.click(submit_sel),
+        submit_force = bool((site.extra or {}).get("submit_force_click"))
+
+        async def _click_submit() -> None:
+            click = session.click
+            if submit_force:
+                await click(submit_sel, force=True)
+            else:
+                await click(submit_sel)
+
+        responses = await session.capture_all(_click_submit,
             timeout_s=site.response_timeout_s, settle_s=site.idle_window_s,
             until=complete)
         matches = matching(responses)

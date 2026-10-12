@@ -8,7 +8,16 @@ defaults:
     ref_field: proNumber
     search_by_path: searchBy     # first response tells us PRO / BOL / ...
     search_by_default: PRO
-  payload_map:                   # keys Calix's backend expects (VERIFY names)
+  activity:
+    # plgtst: mlStatus 0/1 -> 400 "ML status id is not valid"; 2-4 pass validation (confirm with API team).
+    ml_status_default: 2
+    ml_status_by_outcome:
+      ok: 2
+      not_found: 4
+      no_response: 3
+      map_failed: 3
+  # Batch scrape posts one AddCarrierActivity body per housebill (config/app.yaml carrier_activity_path).
+  payload_map:                   # legacy bulk map; AddCarrierActivity uses app/core/carrier_activity.py
     billTo: ctx.bill_to
     carrierCode: ctx.carrier_code
     housebill: ctx.housebill

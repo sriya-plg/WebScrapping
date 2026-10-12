@@ -145,10 +145,10 @@ class _PWSession(BrowserSession):
         if norm(await target.input_value()) != norm(value):
             await _apply()
 
-    async def click(self, selector, frame=None):
+    async def click(self, selector, frame=None, force=False):
         await asyncio.sleep(random.uniform(0.3, 0.9))
         target = self._target(selector, frame).first
-        await target.click()
+        await target.click(force=force)
 
     async def press(self, selector, key, frame=None):
         await asyncio.sleep(random.uniform(0.3, 0.9))

@@ -57,6 +57,9 @@ class BackendClient(ABC):
     async def post_tracking(self, account: CarrierAccount, spec: CarrierSpec, run_id: str,
                             items: list[dict]) -> None: ...
 
+    async def add_carrier_activity(self, payload: dict[str, Any]) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not implement add_carrier_activity")
+
 
 def _accounts(data: Any) -> list[CarrierAccount]:
     rows = data.get("data", data.get("items", [])) if isinstance(data, dict) else data
@@ -82,6 +85,12 @@ class FileBackend(BackendClient):
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{account.bill_to}_{spec.code}.json").write_text(json.dumps(items, indent=2))
 
+    async def add_carrier_activity(self, payload: dict[str, Any]) -> None:
+        d = self.out / "AddCarrierActivity"
+        d.mkdir(parents=True, exist_ok=True)
+        housebill = str(payload.get("housebill") or "unknown")
+        (d / f"{housebill}.json").write_text(json.dumps(payload, indent=2))
+
 
 class HttpBackend(BackendClient):
     def __init__(self, s: BackendSettings):
@@ -91,6 +100,11 @@ class HttpBackend(BackendClient):
         self.http = httpx.AsyncClient(base_url=base_url, timeout=s.timeout_seconds,
                                       headers={s.auth_header: f"{s.auth_scheme} {token}" if s.auth_scheme else token}
                                       if token else {})
+        activity_headers = {}
+        if s.carrier_activity_auth and token:
+            activity_headers = {s.auth_header: f"{s.auth_scheme} {token}" if s.auth_scheme else token}
+        self.http_activity = httpx.AsyncClient(
+            base_url=base_url, timeout=s.timeout_seconds, headers=activity_headers)
         resolver_name = os.environ.get("CREDENTIAL_RESOLVER")
         if resolver_name:
             self.credentials = make_credential_resolver(resolver_name)
@@ -198,6 +212,17 @@ class HttpBackend(BackendClient):
     async def post_tracking(self, account, spec, run_id, items):
         r = await self.http.post(self.s.post_path, json={"runId": run_id, "billTo": account.bill_to,
                                                          "carrierCode": spec.code, "items": items})
+        r.raise_for_status()
+
+    async def add_carrier_activity(self, payload: dict[str, Any]) -> None:
+        r = await self.http_activity.post(self.s.carrier_activity_path, json=payload)
+        if r.is_error:
+            import logging
+            body = (r.text or "")[:500]
+            logging.getLogger(__name__).warning(
+                "AddCarrierActivity HTTP %s body=%s housebill=%s",
+                r.status_code, body, payload.get("housebill"),
+            )
         r.raise_for_status()
 
 

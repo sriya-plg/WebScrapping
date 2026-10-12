@@ -19,5 +19,7 @@ backend:
   auth_scheme: Bearer
   carriers_path: /carriers
   post_path: /tracking/bulk
+  carrier_activity_path: /api/orderentry/AddCarrierActivity
+  carrier_activity_auth: false   # AddCarrierActivity is unauthenticated on Pegasus
   stub_dir: stub
   outbox_dir: out

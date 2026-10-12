@@ -129,8 +129,8 @@ class Runner:
             provider = self.sv.provider_factory(spec.browser, self.sv.settings.state_dir)
             try:
                 outcome = await BatchScraper(provider, spec, self.sv.settings.debug_dir).run_batch(jobs, spec)
-                await enqueue_tracking_updates(
-                    self.sv.settings, self.sv.backend, config, spec, run_id_var.get() or "", outcome)
+                activity_stats = await enqueue_tracking_updates(
+                    self.sv.settings, self.sv.backend, config, spec, run_id_var.get() or "", outcome, jobs)
                 self.last_results.append({"client": spec.client, "carrier": spec.code,
                                           "bill_to": bill_to, "result": outcome})
                 label_key = f"{spec.client}/{spec.code}"
@@ -143,6 +143,8 @@ class Runner:
                     "not_found": not_found_n,
                     "missing": len(outcome.missing),
                     "errors": len(outcome.errors),
+                    "activity_posted": activity_stats.get("posted", 0),
+                    "activity_failed": activity_stats.get("failed", 0),
                 }
                 log(logger, logging.INFO, "carrier batch complete", client=spec.client,
                     carrier_code=spec.code, bill_to=bill_to, requested=len(outcome.requested),

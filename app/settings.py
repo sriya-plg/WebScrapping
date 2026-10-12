@@ -99,6 +99,17 @@ class SiteConfig(_Strict):
         return value
 
 
+class ActivityConfig(_Strict):
+    """AddCarrierActivity: mlStatus must be a valid Pegasus ML status id (plgtst accepts 2-4; 0/1 rejected)."""
+    ml_status_default: int = 2
+    ml_status_by_outcome: dict[str, int] = Field(default_factory=lambda: {
+        "ok": 2,
+        "not_found": 4,
+        "no_response": 3,
+        "map_failed": 3,
+    })
+
+
 class MappingConfig(_Strict):
     """raw carrier JSON -> common schema. Explicit `fields` win; `auto` fills the gaps."""
     auto: bool = True
@@ -127,6 +138,7 @@ class CarrierSpec(_Strict):
     mapping: MappingConfig = MappingConfig()
     pending: dict[str, Any] = {}         # client-level: how to call/parse the pending-refs API
     payload_map: dict[str, str] = {}     # client-level: common schema -> backend payload keys
+    activity: ActivityConfig = ActivityConfig()
     post_hook: str | None = None
 
 
@@ -136,6 +148,8 @@ class BackendSettings(_Strict):
     token_env: str = "TRACKER_API_TOKEN"
     carriers_path: str = "/carriers"
     post_path: str = "/tracking/bulk"
+    carrier_activity_path: str = "/api/orderentry/AddCarrierActivity"
+    carrier_activity_auth: bool = False
     stub_dir: str = "stub"
     outbox_dir: str = "out"
     carrier_config_path: str = "/api/orderentry/GetCarrierConfigurationDetails"

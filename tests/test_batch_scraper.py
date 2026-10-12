@@ -41,7 +41,7 @@ class MockSession(BrowserSession):
             self.input_value += text
         self.typed_chunks.append((text, delay_ms, clear))
     async def get_value(self, selector, frame=None): return self.input_value
-    async def click(self, selector, frame=None):
+    async def click(self, selector, frame=None, force=False):
         self.clicks += 1
         if self.listener:
             self.inputs.append(self.input_value)
