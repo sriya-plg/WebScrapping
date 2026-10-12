@@ -89,7 +89,7 @@ mapping:
     explode: statusHistory
     fields:
       timestamp: date|referenceDate
-      description: expandedStatus|description
+      description: movementHistory.description|description
       location: location.name|location
       status: conciseStatus|expandedStatus|status
       code: transportEventTypeCode|conciseStatus|code|status
