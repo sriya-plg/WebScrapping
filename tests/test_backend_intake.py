@@ -22,6 +22,47 @@ def backend(handler):
     return result
 
 
+def test_get_carrier_shipment_details_new_schema():
+    """GetCarrierShipmentDetails: numeric housebill, no vendorId; optional carrier/status fields."""
+    payload = [
+        {
+            "housebill": 23668423,
+            "proNumber": "164-8491797",
+            "carrierCode": "ESTE03",
+            "serviceLevel": "5D",
+            "status": "Arrived Destination Terminal",
+        },
+        {
+            "housebill": 23668502,
+            "proNumber": "184-8683493",
+            "carrierCode": "ESTE03",
+            "serviceLevel": "5D",
+            "status": "Confirmed on Board",
+        },
+    ]
+
+    def handler(request):
+        if request.url.path.endswith("GetCarrierConfigurationDetails"):
+            return httpx.Response(200, json=[CONFIG])
+        return httpx.Response(200, json=payload)
+
+    client = backend(handler)
+
+    async def run():
+        try:
+            rows = await client.get_shipments(134034, "ESTE03")
+            assert len(rows) == 2
+            assert rows[0].housebill == "23668423"
+            assert rows[0].pro_number == "164-8491797"
+            assert rows[0].vendor_id == ""
+            assert rows[0].carrier_code == "ESTE03"
+            assert rows[0].status == "Arrived Destination Terminal"
+        finally:
+            await client.http.aclose()
+
+    asyncio.run(run())
+
+
 def test_config_and_shipments_filter_empty_and_duplicate_pro():
     def handler(request):
         if request.url.path.endswith("GetCarrierConfigurationDetails"):

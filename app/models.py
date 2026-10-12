@@ -27,10 +27,21 @@ class CarrierConfig(BaseModel):
 
 
 class ShipmentRef(BaseModel):
+    """Row from GetCarrierShipmentDetails (Pegasus order entry)."""
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
     housebill: str
     pro_number: str = Field(alias="proNumber")
-    vendor_id: str = Field(alias="vendorId")
+    vendor_id: str = Field(default="", alias="vendorId")
+    carrier_code: str | None = Field(None, alias="carrierCode")
+    service_level: str | None = Field(None, alias="serviceLevel")
+    status: str | None = None
+
+    @field_validator("housebill", mode="before")
+    @classmethod
+    def _housebill_as_str(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
 
 
 class TrackingJob(BaseModel):
