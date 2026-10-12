@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -208,10 +209,41 @@ async def post_scrape_activities(
             ml_log=ml_log, ml_error=ml_error,
         )
 
+        status_label = result.status if result else "UNKNOWN"
+        origin_label = (result.origin or "-") if result else "-"
+        dest_label = (result.destination or "-") if result else "-"
+        deliv_date = (result.delivery_date or "-") if result else "-"
+        pickup_date = (result.pickup_date or "-") if result else "-"
+
+        update_info = {
+            "housebill": str(job.shipment.housebill or ""),
+            "proNumber": str(job.search_value or ""),
+            "carrierCode": str(spec.code or job.carrier.carrier_code or ""),
+            "status": status_label,
+            "pickupDate": pickup_date,
+            "deliveryDate": deliv_date,
+            "origin": origin_label,
+            "destination": dest_label,
+            "mlStatus": ml_status,
+            "mlLog": ml_log,
+            "eventsCount": len(payload.get("events", [])),
+            "outcome": outcome_type,
+        }
+
         log(logger, logging.INFO, "AddCarrierActivity prepared",
             housebill=job.shipment.housebill, pro=job.search_value,
+            carrier=update_info["carrierCode"], status=status_label,
+            pickup=pickup_date, delivery=deliv_date,
+            origin=origin_label, destination=dest_label,
             ml_status=ml_status, scrape_outcome=scrape_outcome, outcome=outcome_type,
             event_count=len(payload["events"]))
+
+        try:
+            pretty_update = json.dumps(update_info, indent=2, default=str)
+            logger.info("updated shipment information [housebill=%s pro=%s]:\n%s",
+                        update_info["housebill"], update_info["proNumber"], pretty_update)
+        except Exception:
+            pass
 
         if settings.dry_run:
             stats["posted"] += 1

@@ -52,7 +52,7 @@ async def main(client, carrier, rest):
         await ad.authenticate()
         print("SELECTORS:", getattr(ad, "_sel", "n/a"))
         raw = await ad.track(ref, "PRO")
-        print("\nRAW (first 1500 chars):", json.dumps(raw, indent=2)[:1500])
+        print("\nRAW:", json.dumps(raw, indent=2))
         res = ad.normalize(raw, ref, "PRO")
         print("\nNORMALIZED:", res.model_dump_json(exclude={"raw"}, indent=2))
         print("\nPAYLOAD:", json.dumps(build_payload(spec, res, acct, "probe"), indent=2))
