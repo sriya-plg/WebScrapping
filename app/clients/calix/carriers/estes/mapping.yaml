@@ -77,19 +77,37 @@ mapping:
     pieces: data.0.piecesCount|shipment.pieces
     weight: data.0.totalWeight|shipment.weight
     service_level: data.0.serviceLevel|data.0.service|shipment.serviceLevel
-    pod_name: data.0.podName|data.0.signedBy|data.0.delivery.signedBy
+    # receivedBy is the POD signature; driver name is the fallback.
+    pod_name: data.0.receivedBy|data.0.driverInfo.name|data.0.podName|data.0.signedBy|data.0.delivery.signedBy
     pod_datetime: data.0.deliveryDate|data.0.podDateTime|shipment.deliveryDate
+  compose:
+    # deliveryDate + deliveryTime (offset kept, later converted to UTC Z).
+    pod_datetime: "{data.0.deliveryDate}T{data.0.deliveryTime}"
   events:
+    # One event per statusHistory scan. Parent movement supplies code, location, and coordinates.
     path: data.0.movementHistory|history
+    explode: statusHistory
     fields:
-      timestamp: statusHistory.0.referenceDate|date
-      description: description
+      timestamp: date|referenceDate
+      description: expandedStatus|description
       location: location.name|location
-      status: statusHistory.0.expandedStatus|status
-      code: statusHistory.0.statusCode|statusCode|status
+      status: conciseStatus|expandedStatus|status
+      code: transportEventTypeCode|conciseStatus|code|status
       timezone: timezone|tz
-      lat: latitude|lat
-      long: longitude|lng|long
+      # Estes geoCoordinates is [longitude, latitude].
+      lat: location.geoCoordinates.1|latitude|lat
+      long: location.geoCoordinates.0|longitude|lng|long
+    compose:
+      timestamp: "{referenceDate}T{referenceTime}"
+    assign:
+      - if: id=Pickup
+        set:
+          lat: data.0.originTerminal.geoCoordinates.1
+          long: data.0.originTerminal.geoCoordinates.0
+      - if: id=Delivery
+        set:
+          lat: data.0.destinationTerminal.geoCoordinates.1
+          long: data.0.destinationTerminal.geoCoordinates.0
   status_map:
     Delivered: DELIVERED
     "Delivery Completed - OK": DELIVERED

@@ -32,6 +32,23 @@ def _job(housebill: str, pro: str) -> TrackingJob:
     )
 
 
+def test_event_code_is_capped_at_50_characters():
+    job = _job("HB123", "184-8684463")
+    long_status = "En route to delivery facility at Marshall, MI (095)"
+    assert len(long_status) > 50
+    result = TrackingResult(
+        reference="1848684463", ref_type="PRO", carrier_code="ESTE03", bill_to="134034",
+        status="DELIVERED",
+        events=[{"timestamp": "2026-10-07T13:01:59-05:00", "description": "Actual Delivery", "status": long_status}],
+    )
+    start = datetime(2026, 10, 11, 7, 22, 20, tzinfo=timezone.utc)
+    payload = build_add_carrier_activity(
+        job, result, outcome="found", summary={}, ml_start=start, ml_end=start, ml_status=2, ml_log="ok",
+    )
+    assert len(payload["events"][0]["code"]) == 50
+    assert payload["events"][0]["code"] == long_status[:50]
+
+
 def test_pegasus_datetime_format():
     assert pegasus_datetime("2026-10-11T07:22:20.874Z") == "2026-10-11T07:22:20Z"
     assert pegasus_datetime(datetime(2026, 10, 11, 7, 22, 20, tzinfo=timezone.utc)) == "2026-10-11T07:22:20Z"

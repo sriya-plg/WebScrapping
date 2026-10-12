@@ -5,6 +5,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from app.core.carrier_activity import build_add_carrier_activity
 from app.core.mapper import normalize
 from app.models import CarrierAccount, CarrierConfig, ShipmentRef, TrackingJob
@@ -160,3 +162,127 @@ def test_estes_fixture_still_maps_events():
     result = normalize(ESTES, raw, "1234567890", "PRO", acct)
     assert result.status == "DELIVERED"
     assert result.events[0].description == "Delivered"
+
+
+def _estes_job(housebill="23671345", pro="184-8684463") -> TrackingJob:
+    config = CarrierConfig(
+        id=1, carrierName="Estes", carrierCode="ESTE03",
+        trackingUrl="https://www.estes-express.com/myestes/shipment-tracking/",
+        billTo=134034, customerName="Calix", isActive=True,
+    )
+    return TrackingJob(
+        carrier=config,
+        shipment=ShipmentRef(housebill=housebill, proNumber=pro, vendorId="ESTE03"),
+        search_by="proNumber", search_value=pro,
+    )
+
+
+def test_estes_movement_history_maps_to_add_carrier_activity():
+    """Each Estes statusHistory scan becomes an event: code, expanded description, time, coordinates."""
+    raw = {
+        "data": [{
+            "pro": "1848718241",
+            "deliveryDate": "2026-10-07",
+            "deliveryTime": "13:01:59-05:00",
+            "receivedBy": "Seth",
+            "driverInfo": {"name": " Andrew"},
+            "status": {"conciseStatus": "Delivered", "expandedStatus": "Delivery Completed - OK"},
+            "originTerminal": {"geoCoordinates": ["-97.3410885", "32.837842"]},
+            "destinationTerminal": {"geoCoordinates": ["-96.713927", "43.59406"]},
+            "movementHistory": [
+                {
+                    "id": "Pickup",
+                    "description": "Actual Pickup",
+                    "transportEventTypeCode": "Actual Pickup",
+                    "statusHistory": [{
+                        "expandedStatus": "Pickup Location Serviced",
+                        "referenceDate": "2026-10-02",
+                        "referenceTime": "19:33:51-05:00",
+                    }],
+                },
+                {
+                    "id": "164",
+                    "description": "Planned Waypoint",
+                    "transportEventTypeCode": "Planned Waypoint",
+                    "location": {
+                        "name": "Kansas City",
+                        "geoCoordinates": ["-94.670554", "39.089552"],
+                    },
+                    "statusHistory": [
+                        {
+                            "expandedStatus": "En route to Estes facility at Kansas City, KS (164)",
+                            "referenceDate": "2026-10-06",
+                            "referenceTime": "02:44:48-05:00",
+                        },
+                        {
+                            "expandedStatus": "Departed Estes facility at Kansas City, KS (164)",
+                            "referenceDate": "2026-10-06",
+                            "referenceTime": "21:37:45-05:00",
+                        },
+                    ],
+                },
+                {
+                    "id": "Delivery",
+                    "description": "Actual Delivery",
+                    "transportEventTypeCode": "Delivery",
+                    "statusHistory": [
+                        {
+                            "expandedStatus": "Out for Delivery",
+                            "referenceDate": "2026-10-07",
+                            "referenceTime": "10:22:44-05:00",
+                        },
+                        {
+                            "expandedStatus": "Delivery Completed - OK",
+                            "referenceDate": "2026-10-07",
+                            "referenceTime": "13:01:59-05:00",
+                        },
+                    ],
+                },
+            ],
+        }],
+    }
+    acct = CarrierAccount(id=1, carrierName="Estes", carrierCode="ESTE03", billTo="134034")
+    result = normalize(ESTES, raw, "184-8684463", "PRO", acct)
+    assert result.reference == "1848718241"
+    assert result.pod_name == "Seth"
+    assert result.pod_datetime.startswith("2026-10-07T13:01:59")
+    assert [e.description for e in result.events] == [
+        "Pickup Location Serviced",
+        "En route to Estes facility at Kansas City, KS (164)",
+        "Departed Estes facility at Kansas City, KS (164)",
+        "Out for Delivery",
+        "Delivery Completed - OK",
+    ]
+    assert result.events[0].code == "Actual Pickup"
+    assert result.events[0].timezone == "-05:00"
+    assert result.events[0].lat == pytest.approx(32.837842)
+    assert result.events[0].long == pytest.approx(-97.3410885)
+    assert result.events[1].code == "Planned Waypoint"
+    assert result.events[1].timestamp.startswith("2026-10-06T02:44:48")
+    assert result.events[2].timestamp.startswith("2026-10-06T21:37:45")
+    assert result.events[1].lat == pytest.approx(39.089552)
+    assert result.events[1].long == pytest.approx(-94.670554)
+    assert result.events[-1].code == "Delivery"
+    assert result.events[-1].lat == pytest.approx(43.59406)
+    assert result.events[-1].long == pytest.approx(-96.713927)
+
+    payload = build_add_carrier_activity(
+        _estes_job(), result, outcome="found", summary={},
+        ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=ESTES,
+    )
+    assert payload["proNumber"] == "184-8684463"
+    assert payload["carrierCode"] == "ESTE03"
+    assert payload["reference"] == "1848718241"
+    assert payload["podName"] == "Seth"
+    assert payload["podDateTime"] == "2026-10-07T18:01:59Z"
+    assert [ev["code"] for ev in payload["events"]] == [
+        "Actual Pickup", "Planned Waypoint", "Planned Waypoint", "Delivery", "Delivery",
+    ]
+    assert all(len(ev["code"]) <= 50 for ev in payload["events"])
+    assert payload["events"][1]["description"] == "En route to Estes facility at Kansas City, KS (164)"
+    assert payload["events"][1]["eventDateTime"] == "2026-10-06T07:44:48Z"
+    assert payload["events"][1]["timezone"] == "-05:00"
+    assert payload["events"][2]["description"] == "Departed Estes facility at Kansas City, KS (164)"
+    assert payload["events"][2]["eventDateTime"] == "2026-10-07T02:37:45Z"
+    assert payload["events"][-1]["description"] == "Delivery Completed - OK"
+    assert payload["events"][-1]["eventDateTime"] == "2026-10-07T18:01:59Z"

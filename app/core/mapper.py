@@ -7,7 +7,7 @@ from __future__ import annotations
 import importlib
 import re
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from app.models import CarrierAccount, TrackingEvent, TrackingResult
@@ -48,10 +48,19 @@ def compose_value(obj: Any, template: str) -> Any:
         return None
     if "{" not in template:
         return get_path(obj, template)
+    filled = False
+
     def repl(match: re.Match) -> str:
+        nonlocal filled
         value = get_path(obj, match.group(1).strip())
-        return "" if value in (None, "") else str(value)
+        if value in (None, ""):
+            return ""
+        filled = True
+        return str(value)
+
     text = _COMPOSE_RX.sub(repl, template)
+    if not filled:
+        return None
     text = re.sub(r"\s+,", ",", text)
     text = re.sub(r",\s*$", "", text)
     text = re.sub(r"\s+", " ", text).strip(" ,")
@@ -67,6 +76,7 @@ def parse_loose_datetime(value: Any) -> str | None:
     text = re.sub(r"\s+", " ", str(value).strip())
     if not text:
         return None
+    text = text.rstrip("T").strip()
     text = text.replace("Z", "")
     text = re.sub(r"\b([ap])\.?m\.?\b", lambda m: m.group(1).upper() + "M", text, flags=re.I)
     for fmt in (
@@ -214,6 +224,87 @@ def status_from_text(text: str, status_map: dict[str, str]) -> str:
     return "UNKNOWN"
 
 
+def _time_sort_key(value: Any) -> tuple:
+    text = "" if value in (None, "") else str(value)
+    parsed = parse_loose_datetime(text) if text else None
+    if parsed:
+        try:
+            dt = datetime.fromisoformat(parsed)
+        except ValueError:
+            dt = None
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (1, dt.timestamp())
+    return (0, text)
+
+
+def _row_max(rows: list, template: str) -> dict | None:
+    """Pick the row whose composed template is latest. Ties keep the last row."""
+    best, best_key = None, None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = compose_value(row, template) if template and "{" in template else get_path(row, template)
+        key = _time_sort_key(text)
+        if best is None or key >= best_key:
+            best, best_key = row, key
+    return best
+
+
+def _explode_events(items: list, explode: str | None) -> list[dict]:
+    """One output row per child list (Estes statusHistory). Parent fields fill gaps on each child."""
+    if not explode:
+        return [it for it in items if isinstance(it, dict)]
+    drop = explode.split(".")[0]
+    out: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        children = get_path(it, explode, None)
+        if not isinstance(children, list) or not children:
+            out.append(it)
+            continue
+        parent = {k: v for k, v in it.items() if k != drop}
+        for child in children:
+            if isinstance(child, dict):
+                out.append({**parent, **child})
+    return out
+
+
+def _prepare_event_item(item: dict, select: dict | None) -> dict:
+    """Copy `item` and attach selected child rows (for example statusHistory max time)."""
+    prepared = dict(item)
+    for alias, spec in (select or {}).items():
+        if not alias or not isinstance(spec, dict):
+            continue
+        rows = get_path(prepared, str(spec.get("from") or ""), []) or []
+        if not isinstance(rows, list):
+            continue
+        chosen = _row_max(rows, str(spec.get("max") or ""))
+        if chosen:
+            prepared[alias] = chosen
+    return prepared
+
+
+def _assign_event_fields(data: dict, item: dict, raw: dict, rules: list | None) -> None:
+    """Fill empty event fields from the root document when `if: field=value` matches."""
+    for rule in rules or []:
+        if not isinstance(rule, dict):
+            continue
+        cond = str(rule.get("if") or "")
+        if "=" in cond:
+            field, expected = cond.split("=", 1)
+            if str(item.get(field.strip(), "")) != expected.strip():
+                continue
+        for field, path in (rule.get("set") or {}).items():
+            if data.get(field) not in (None, ""):
+                continue
+            value = get_path(raw, str(path))
+            if value not in (None, ""):
+                data[field] = value
+
+
 # --------------------------------------------------------------------------------------- stage 1
 def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: CarrierAccount) -> TrackingResult:
     m, notes = spec.mapping, []
@@ -234,14 +325,24 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
     if m.events and m.events.get("path"):
         flds = m.events.get("fields", {})
         compose_ev = m.events.get("compose") or {}
-        for it in (get_path(raw, m.events["path"], []) or []):
-            data = {f: get_path(it, p) for f, p in flds.items() if f and p}
+        select = m.events.get("select") or {}
+        assign = m.events.get("assign") or []
+        rows = _explode_events(get_path(raw, m.events["path"], []) or [], m.events.get("explode"))
+        for it in rows:
+            prepared = _prepare_event_item(it, select)
+            data = {f: get_path(prepared, p) for f, p in flds.items() if f and p}
             for field, template in compose_ev.items():
-                composed = compose_value(it, template)
+                composed = compose_value(prepared, template)
                 if composed not in (None, ""):
                     data[field] = composed
-            if data.get("timestamp"):
-                data["timestamp"] = parse_loose_datetime(data["timestamp"]) or data["timestamp"]
+            _assign_event_fields(data, prepared, raw, assign)
+            raw_ts = data.get("timestamp")
+            if raw_ts and not data.get("timezone"):
+                offset = re.search(r"([+-]\d{2}:\d{2})\s*$", str(raw_ts))
+                if offset:
+                    data["timezone"] = offset.group(1)
+            if raw_ts:
+                data["timestamp"] = parse_loose_datetime(raw_ts) or raw_ts
             events.append(TrackingEvent(**data))
     elif m.auto and (found := auto_events(raw)):
         events = found[1]

@@ -107,7 +107,8 @@ def _activity_events(
     for event in result.events:
         item = apply_map(event.model_dump(mode="json"), events_map)
         code = item.get("code") or event.status or "EVENT"
-        item["code"] = str(code)[:64]
+        # plgtst returns HTTP 500 when event code is longer than 50 characters.
+        item["code"] = str(code)[:50]
         item["description"] = item.get("description") or ""
         item["eventDateTime"] = pegasus_datetime(
             item.get("eventDateTime") or event.timestamp or result.scraped_at,
