@@ -169,8 +169,9 @@ class MappingConfig(_Strict):
     """
     auto: bool = True
     fields: dict[str, str] = {}          # canonical field -> dotted path ("a.b|c.d" = first non-empty)
+    compose: dict[str, str] = {}         # field -> "{path} {path}" template (date+time, city+state)
     status_map: dict[str, str] = {}      # carrier status text (any case) -> common status
-    events: dict[str, Any] | None = None  # {path: "history", fields: {timestamp: "date", ...}}
+    events: dict[str, Any] | None = None  # {path, fields, compose}
 
     @field_validator("fields")
     @classmethod
@@ -262,7 +263,7 @@ def load_settings(path: str | Path = "config/app.yaml") -> AppSettings:
 
 
 # ------------------------------------------------------------------------------------------ loader
-_MAPPING_KEYS = {"auto", "fields", "status_map", "events"}
+_MAPPING_KEYS = {"auto", "fields", "compose", "status_map", "events"}
 
 
 def _merge(a: dict, b: dict) -> dict:

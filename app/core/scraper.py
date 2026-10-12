@@ -98,6 +98,16 @@ class Scraper(Protocol):
     async def run(self, job: TrackingJob) -> ScrapeBatchResult: ...
 
 
+def _path_values_any(obj: Any, path: str) -> list[Any]:
+    """Like _path_values but `a|b` tries each alternative."""
+    found: list[Any] = []
+    for alt in str(path or "").split("|"):
+        alt = alt.strip()
+        if alt:
+            found.extend(_path_values(obj, alt))
+    return found
+
+
 def _path_values(obj: Any, path: str) -> list[Any]:
     """Resolve dotted JSON paths with numeric indexes and []/[*] list expansion."""
     path = path.removeprefix("$").lstrip(".")
@@ -617,14 +627,16 @@ class BatchScraper:
                     raw = values[0]
             elif "data" in raw and isinstance(raw["data"], list):
                 raw = raw["data"]
-            elif "referenceNumbers" in raw or "shipment" in raw:
+            elif any(key in raw for key in (
+                "referenceNumbers", "shipment", "proNumber", "shipmentInformation", "history",
+            )):
                 raw = [raw]
         if not isinstance(raw, list):
             return False
         item_pro_path = self._single_batch_item_pro_path(site)
         matched: set[str] = set()
         for item in raw:
-            for value in _path_values(item, item_pro_path):
+            for value in _path_values_any(item, item_pro_path):
                 normalized = normalize_pro(value, spec)
                 if normalized not in keys:
                     continue
@@ -668,7 +680,7 @@ class BatchScraper:
         return found
 
     def _matched_keys(self, raw: Any, path: str, keys: dict[str, str], spec: CarrierSpec) -> set[str]:
-        return {normalized for value in _path_values(raw, path)
+        return {normalized for value in _path_values_any(raw, path)
                 if (normalized := normalize_pro(value, spec)) in keys}
 
     async def _carrier_not_found_message(self, session: BrowserSession, spec: CarrierSpec) -> str | None:

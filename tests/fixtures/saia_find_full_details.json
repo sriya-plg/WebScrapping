@@ -1,57 +1,58 @@
 {
-  "referenceNumbers": {
-    "proNumber": "771043317403"
-  },
-  "shipment": {
-    "status": "Delivered",
-    "pickupDate": "2026-10-08T08:00:00",
-    "pieces": 3,
-    "weight": 450,
-    "serviceLevel": "LTL"
-  },
-  "delivery": {
-    "deliveredDate": "2026-10-11T14:30:00",
-    "expectedDate": "2026-10-11",
-    "signedBy": "J SMITH"
-  },
+  "proNumber": "77137570910",
   "shipper": {
-    "companyName": "[SANITIZED SHIPPER]",
-    "address": { "city": "Dallas", "state": "TX" }
+    "name": "CALIX",
+    "city": "COPPELL",
+    "state": "TX",
+    "zip": "75019"
   },
   "consignee": {
-    "companyName": "[SANITIZED CONSIGNEE]",
-    "address": { "city": "Houston", "state": "TX" }
+    "name": "ALLO COMMUNICATIONS",
+    "city": "YUMA",
+    "state": "AZ",
+    "zip": "85364"
+  },
+  "referenceNumbers": {
+    "customerBOLNumber": "23671828",
+    "purchaseOrderNumber": "PO-0020396"
+  },
+  "deliveryInformation": {
+    "expectedDeliveryDate": "Contact Customer Service 800-765-7242",
+    "deliveryDate": "2026-09-15",
+    "deliveryTime": { "from": "12:12", "to": "12:13" },
+    "signature": "Received by-Shawn"
+  },
+  "shipmentInformation": {
+    "totalPieces": "1",
+    "totalWeight": "224",
+    "type": "PPD",
+    "pickupDate": "2026-09-10",
+    "status": "Delivered"
   },
   "history": [
     {
-      "status": "Picked Up",
-      "statusCode": "PU",
-      "date": "2026-10-08T08:00:00",
-      "description": "Shipment picked up",
-      "city": "Dallas",
-      "timezone": "CST",
-      "latitude": 32.78,
-      "longitude": -96.8
+      "activity": "Delivered",
+      "city": "YUMA",
+      "date": "2026-09-15",
+      "state": "AZ",
+      "time": "12:13 pm",
+      "display": true
     },
     {
-      "status": "In Transit",
-      "statusCode": "IT",
-      "date": "2026-10-09T11:15:00",
-      "description": "Departed terminal",
-      "city": "Dallas",
-      "timezone": "CST",
-      "latitude": 32.78,
-      "longitude": -96.8
+      "activity": "Arrived at Destination Terminal",
+      "city": "Calexico",
+      "date": "2026-09-15",
+      "state": "CA",
+      "time": "06:51 am",
+      "display": false
     },
     {
-      "status": "Delivered",
-      "statusCode": "DL",
-      "date": "2026-10-11T14:30:00",
-      "description": "Delivered",
-      "city": "Houston",
-      "timezone": "CST",
-      "latitude": 29.76,
-      "longitude": -95.37
+      "activity": "Pickup from Customer",
+      "city": "COPPELL",
+      "date": "2026-09-10",
+      "state": "TX",
+      "time": "02:24 pm",
+      "display": false
     }
   ]
 }

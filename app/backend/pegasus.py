@@ -116,8 +116,8 @@ class PegasusBackend(BackendClient):
     async def post_tracking(self, account, spec, run_id, items):
         await self.output.post_tracking(account, spec, run_id, items)
 
-    async def add_carrier_activity(self, payload: dict[str, Any]) -> None:
-        await self.output.add_carrier_activity(payload)
+    async def add_carrier_activity(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        return await self.output.add_carrier_activity(payload)
 
     async def close(self):
         await self.http.aclose()

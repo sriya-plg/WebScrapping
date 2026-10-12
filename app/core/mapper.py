@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib
 import re
 from collections import deque
+from datetime import datetime
 from typing import Any, Iterator
 
 from app.models import CarrierAccount, TrackingEvent, TrackingResult
@@ -36,6 +37,56 @@ def get_path(obj: Any, path: str, default: Any = None) -> Any:
         if ok and cur not in (None, "", []):
             return cur
     return default
+
+
+_COMPOSE_RX = re.compile(r"\{([^}]+)\}")
+
+
+def compose_value(obj: Any, template: str) -> Any:
+    """Fill `{dotted.path}` placeholders from obj. Used by mapping.yaml `compose:`."""
+    if not template:
+        return None
+    if "{" not in template:
+        return get_path(obj, template)
+    def repl(match: re.Match) -> str:
+        value = get_path(obj, match.group(1).strip())
+        return "" if value in (None, "") else str(value)
+    text = _COMPOSE_RX.sub(repl, template)
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r",\s*$", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" ,")
+    return text or None
+
+
+def parse_loose_datetime(value: Any) -> str | None:
+    """Turn Saia-style `2026-09-15` + `12:13 pm` (or already-ISO) into ISO-8601."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.replace(microsecond=0).isoformat()
+    text = re.sub(r"\s+", " ", str(value).strip())
+    if not text:
+        return None
+    text = text.replace("Z", "")
+    text = re.sub(r"\b([ap])\.?m\.?\b", lambda m: m.group(1).upper() + "M", text, flags=re.I)
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %I:%M %p",
+        "%Y-%m-%d %I:%M%p",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(text, fmt).isoformat()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text).replace(microsecond=0).isoformat()
+    except ValueError:
+        return text
 
 
 def _nk(k: Any) -> str:
@@ -167,6 +218,13 @@ def status_from_text(text: str, status_map: dict[str, str]) -> str:
 def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: CarrierAccount) -> TrackingResult:
     m, notes = spec.mapping, []
     vals: dict[str, Any] = {f: get_path(raw, p) for f, p in m.fields.items()}
+    for field, template in (m.compose or {}).items():
+        composed = compose_value(raw, template)
+        if composed not in (None, ""):
+            vals[field] = composed
+            notes.append(f"compose:{field}")
+    if vals.get("pod_datetime"):
+        vals["pod_datetime"] = parse_loose_datetime(vals["pod_datetime"]) or vals["pod_datetime"]
     if m.auto:
         for f, (p, v) in auto_fields(raw).items():
             if vals.get(f) in (None, ""):
@@ -175,8 +233,16 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
     events: list[TrackingEvent] = []
     if m.events and m.events.get("path"):
         flds = m.events.get("fields", {})
-        events = [TrackingEvent(**{f: get_path(it, p) for f, p in flds.items() if f and p})
-                  for it in (get_path(raw, m.events["path"], []) or [])]
+        compose_ev = m.events.get("compose") or {}
+        for it in (get_path(raw, m.events["path"], []) or []):
+            data = {f: get_path(it, p) for f, p in flds.items() if f and p}
+            for field, template in compose_ev.items():
+                composed = compose_value(it, template)
+                if composed not in (None, ""):
+                    data[field] = composed
+            if data.get("timestamp"):
+                data["timestamp"] = parse_loose_datetime(data["timestamp"]) or data["timestamp"]
+            events.append(TrackingEvent(**data))
     elif m.auto and (found := auto_events(raw)):
         events = found[1]
         notes.append(f"auto:events<-{found[0]}")

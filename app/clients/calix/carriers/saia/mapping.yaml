@@ -41,7 +41,7 @@ site:
   response_url_pattern: '(?i)/api/v1/tracking/(find-full-details?|find-by-pro-number)'
   response_url_prefer: find-full-detail
   expected_response_shape: single_batch
-  response_pro_path: "[].referenceNumbers.proNumber"
+  response_pro_path: "[].proNumber|[].referenceNumbers.proNumber"
   strip_spaces_dashes: true
   extra:
     # Saia UI: enter 11-digit PROs (drop the 12th check digit from the backend value).
@@ -50,7 +50,7 @@ site:
     single_batch_unmatched_is_not_found: true
     return_to_tracking_after_submit: true
     batch_collect_all_responses: true
-    single_batch_item_pro_path: referenceNumbers.proNumber
+    single_batch_item_pro_path: proNumber|referenceNumbers.proNumber
     landing_settle_s: 2.5
 
   response_timeout_s: 45
@@ -76,29 +76,35 @@ site:
 mapping:
   auto: true
   fields:
-    reference: "referenceNumbers.proNumber|[0].referenceNumbers.proNumber"
-    status: "shipment.status|[0].shipment.status"
-    pickup_date: "shipment.pickupDate|[0].shipment.pickupDate"
-    delivery_date: "delivery.deliveredDate|[0].delivery.deliveredDate"
-    eta: "delivery.expectedDate|[0].delivery.expectedDate"
-    origin: "shipper.companyName|[0].shipper.companyName|shipper.address.city"
-    destination: "consignee.companyName|[0].consignee.companyName|consignee.address.city"
-    pieces: "shipment.pieces|[0].shipment.pieces"
-    weight: "shipment.weight|[0].shipment.weight"
-    service_level: "shipment.serviceLevel|shipment.service|[0].shipment.serviceLevel"
-    pod_name: "delivery.signedBy|delivery.podName|delivery.signature|[0].delivery.signedBy"
-    pod_datetime: "delivery.deliveredDate|delivery.podDateTime|[0].delivery.deliveredDate"
+    reference: "proNumber|referenceNumbers.proNumber|[0].proNumber|[0].referenceNumbers.proNumber"
+    status: "shipmentInformation.status|shipment.status|[0].shipmentInformation.status|[0].shipment.status"
+    pickup_date: "shipmentInformation.pickupDate|shipment.pickupDate|[0].shipmentInformation.pickupDate"
+    delivery_date: "deliveryInformation.deliveryDate|delivery.deliveredDate|[0].deliveryInformation.deliveryDate"
+    eta: "deliveryInformation.expectedDeliveryDate|delivery.expectedDate"
+    origin: "shipper.name|shipper.companyName|shipper.city|shipper.address.city"
+    destination: "consignee.name|consignee.companyName|consignee.city|consignee.address.city"
+    pieces: "shipmentInformation.totalPieces|shipment.pieces"
+    weight: "shipmentInformation.totalWeight|shipment.weight"
+    service_level: "shipmentInformation.type|shipment.serviceLevel|shipment.service"
+    pod_name: "deliveryInformation.signature|delivery.signedBy|delivery.podName|delivery.signature"
+    pod_datetime: "deliveryInformation.deliveryDate|delivery.deliveredDate|delivery.podDateTime"
+  compose:
+    # signature is POD name; delivery date + time.to is POD datetime
+    pod_datetime: "{deliveryInformation.deliveryDate} {deliveryInformation.deliveryTime.to}"
   events:
     path: "history|trackingHistory|statusHistory|events|[0].history"
     fields:
       timestamp: date|eventDate|eventDateTime|datetime|timestamp
-      description: description|statusDescription|activity
+      description: activity|description|statusDescription
       location: city|location
-      status: status|statusDescription
-      code: statusCode|code|status
+      status: activity|status|statusDescription
+      code: activity|statusCode|code|status
       timezone: timezone|tz
       lat: latitude|lat
       long: longitude|lng|long
+    compose:
+      timestamp: "{date} {time}"
+      location: "{city}, {state}"
   status_map:
     Delivered: DELIVERED
     "Delivery Completed - OK": DELIVERED

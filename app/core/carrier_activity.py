@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.core.mapper import apply_map, get_path, normalize
+from app.core.scrape_log import log_scrape_and_tms
 from app.core.scraper import ScrapeBatchResult
 from app.logging_setup import log
 from app.models import CarrierAccount, CarrierConfig, TrackingJob, TrackingResult
@@ -183,8 +184,9 @@ def build_add_carrier_activity(
         dumped = result.model_dump(mode="json", exclude={"raw"})
         dumped.pop("events", None)
         data.update(dumped)
+    # TrackingResult.bill_to / carrier_code must not replace intake identity (numeric billTo, vendor code).
+    data.update(ctx)
     data["ctx"] = ctx
-    # YAML-mapped values win for carrier fields; ctx keeps scrape metadata.
     data["service_level"] = get_path(data, "service_level") or ctx["service_level"]
     data["pod_name"] = get_path(data, "pod_name") or ctx["pod_name"]
     data["pod_datetime"] = get_path(data, "pod_datetime") or ctx["pod_datetime"]
@@ -192,6 +194,19 @@ def build_add_carrier_activity(
 
     activity = spec.activity if spec is not None else ActivityConfig()
     payload = apply_map(data, activity.payload_map)
+    if payload.get("billTo") in (None, ""):
+        payload["billTo"] = ctx["bill_to"]
+    else:
+        try:
+            payload["billTo"] = int(payload["billTo"])
+        except (TypeError, ValueError):
+            payload["billTo"] = ctx["bill_to"]
+    if not payload.get("carrierCode"):
+        payload["carrierCode"] = ctx["carrier_code"]
+    if not payload.get("housebill"):
+        payload["housebill"] = ctx["housebill"]
+    if not payload.get("proNumber"):
+        payload["proNumber"] = ctx["pro_number"]
     for key in _STRING_PAYLOAD_KEYS:
         if key in payload and payload[key] is None:
             payload[key] = ""
@@ -204,6 +219,49 @@ def build_add_carrier_activity(
         payload["mlError"] = str(payload["mlError"] or "")[:2000]
     payload["events"] = _activity_events(result, activity.events_map, fallback=ml_end)
     return payload
+
+
+def _unpack_activity_result(api_result: Any) -> tuple[bool, int | None, Any]:
+    """Normalize add_carrier_activity() return values (dict, None, or other)."""
+    if api_result is None:
+        return True, None, ""
+    if isinstance(api_result, dict) and ("ok" in api_result or "status_code" in api_result or "body" in api_result):
+        body = api_result.get("body", "")
+        status_code = api_result.get("status_code")
+        ok = bool(api_result.get("ok", True))
+        if ok:
+            reject = _activity_body_rejected(body)
+            if reject:
+                return False, status_code, body
+        return ok, status_code, body
+    return True, None, api_result
+
+
+def _activity_body_rejected(body: Any) -> str:
+    if not isinstance(body, dict):
+        return ""
+    if body.get("isSuccess") is False or body.get("success") is False or body.get("isError") is True:
+        return str(body.get("error") or body.get("errorMessage") or body.get("message") or body)[:500]
+    return ""
+
+
+def _log_activity_http_error(job: TrackingJob, payload: dict[str, Any], exc: httpx.HTTPStatusError) -> None:
+    response = exc.response
+    body: Any = ""
+    if response is not None:
+        try:
+            body = response.json()
+        except ValueError:
+            body = (response.text or "")[:2000]
+        logger.info(
+            "--- TMS HTTP response (AddCarrierActivity) housebill=%s pro=%s http=%s ---\n%s\n--- end TMS HTTP response ---",
+            payload.get("housebill"), payload.get("proNumber"),
+            response.status_code,
+            json.dumps(body, indent=2, default=str, ensure_ascii=False) if not isinstance(body, str) else body,
+        )
+        log(logger, logging.WARNING, "AddCarrierActivity HTTP error",
+            housebill=job.shipment.housebill, pro=job.search_value,
+            http_status=response.status_code, response=str(body)[:500])
 
 
 def _normalize_raw(raw: Any) -> dict[str, Any]:
@@ -282,41 +340,16 @@ async def post_scrape_activities(
             ml_log=ml_log, ml_error=ml_error, spec=spec,
         )
 
-        status_label = result.status if result else "UNKNOWN"
-        origin_label = (result.origin or "-") if result else "-"
-        dest_label = (result.destination or "-") if result else "-"
-        deliv_date = (result.delivery_date or "-") if result else "-"
-        pickup_date = (result.pickup_date or "-") if result else "-"
-
-        update_info = {
-            "housebill": str(job.shipment.housebill or ""),
-            "proNumber": str(job.search_value or ""),
-            "carrierCode": str(spec.code or job.carrier.carrier_code or ""),
-            "status": status_label,
-            "pickupDate": pickup_date,
-            "deliveryDate": deliv_date,
-            "origin": origin_label,
-            "destination": dest_label,
-            "mlStatus": ml_status,
-            "mlLog": ml_log,
-            "eventsCount": len(payload.get("events", [])),
-            "outcome": outcome_type,
-        }
-
-        log(logger, logging.INFO, "AddCarrierActivity prepared",
-            housebill=job.shipment.housebill, pro=job.search_value,
-            carrier=update_info["carrierCode"], status=status_label,
-            pickup=pickup_date, delivery=deliv_date,
-            origin=origin_label, destination=dest_label,
-            ml_status=ml_status, scrape_outcome=scrape_outcome, outcome=outcome_type,
-            event_count=len(payload["events"]))
-
-        try:
-            pretty_update = json.dumps(update_info, indent=2, default=str)
-            logger.info("updated shipment information [housebill=%s pro=%s]:\n%s",
-                        update_info["housebill"], update_info["proNumber"], pretty_update)
-        except Exception:
-            pass
+        activity = spec.activity if spec is not None else ActivityConfig()
+        log_scrape_and_tms(
+            housebill=str(payload.get("housebill") or job.shipment.housebill or ""),
+            pro=str(payload.get("proNumber") or job.search_value or ""),
+            scrape_outcome=scrape_outcome,
+            raw=raw,
+            result=result,
+            payload=payload,
+            payload_map=activity.payload_map,
+        )
 
         if settings.dry_run:
             stats["posted"] += 1
@@ -324,13 +357,15 @@ async def post_scrape_activities(
 
         try:
             last_exc: Exception | None = None
+            api_result: dict[str, Any] | None = None
             for attempt in range(3):
                 try:
-                    await post(payload)
+                    api_result = await post(payload)
                     last_exc = None
                     break
                 except httpx.HTTPStatusError as exc:
                     last_exc = exc
+                    _log_activity_http_error(job, payload, exc)
                     if exc.response.status_code < 500:
                         break
                     if attempt + 1 < 3:
@@ -341,9 +376,24 @@ async def post_scrape_activities(
                         await asyncio.sleep(min(15, 2 ** attempt))
             if last_exc:
                 raise last_exc
+            ok, status_code, body = _unpack_activity_result(api_result)
+            logger.info(
+                "--- TMS HTTP response (AddCarrierActivity) housebill=%s pro=%s http=%s ---\n%s\n--- end TMS HTTP response ---",
+                payload.get("housebill"), payload.get("proNumber"),
+                status_code if status_code is not None else "n/a",
+                json.dumps(body, indent=2, default=str, ensure_ascii=False) if not isinstance(body, str) else body,
+            )
+            if not ok:
+                stats["failed"] += 1
+                log(logger, logging.ERROR, "AddCarrierActivity rejected",
+                    housebill=job.shipment.housebill, pro=job.search_value,
+                    http_status=status_code, response=str(body)[:500])
+                continue
             stats["posted"] += 1
             log(logger, logging.INFO, "AddCarrierActivity posted",
-                housebill=job.shipment.housebill, pro=job.search_value, ml_status=ml_status)
+                housebill=job.shipment.housebill, pro=job.search_value,
+                bill_to=payload.get("billTo"), ml_status=ml_status,
+                http_status=status_code)
         except Exception as exc:
             stats["failed"] += 1
             log(logger, logging.ERROR, "AddCarrierActivity failed",

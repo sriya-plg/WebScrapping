@@ -57,51 +57,52 @@ def test_saia_find_by_pro_maps_summary_without_events():
 
 
 def test_saia_find_full_details_maps_complete_fields():
-    result = normalize(SAIA, FULL, "771043317403", "PRO", ACCT)
+    result = normalize(SAIA, FULL, "77137570910", "PRO", ACCT)
     assert result.status == "DELIVERED" and result.delivered
-    assert result.service_level == "LTL"
-    assert result.pod_name == "J SMITH"
-    assert result.pod_datetime.startswith("2026-10-11")
+    assert result.service_level == "PPD"
+    assert result.pod_name == "Received by-Shawn"
+    assert result.pod_datetime.startswith("2026-09-15T12:13")
+    assert result.origin == "CALIX"
+    assert result.destination == "ALLO COMMUNICATIONS"
     assert len(result.events) == 3
-    last = result.events[-1]
-    assert last.code == "DL"
-    assert last.description == "Delivered"
-    assert last.timezone == "CST"
-    assert last.lat == 29.76
-    assert last.long == -95.37
+    first = result.events[0]
+    assert first.code == "Delivered"
+    assert first.description == "Delivered"
+    assert first.location == "YUMA, AZ"
+    assert first.timestamp == "2026-09-15T12:13:00"
 
 
 def test_full_details_become_add_carrier_activity_payload():
-    result = normalize(SAIA, FULL, "771043317403", "PRO", ACCT)
+    result = normalize(SAIA, FULL, "77137570910", "PRO", ACCT)
     payload = build_add_carrier_activity(
-        _job(), result, outcome="found", summary={},
+        _job("HB123", "77137570910"), result, outcome="found", summary={},
         ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=SAIA,
     )
     assert payload["housebill"] == "HB123"
-    assert payload["proNumber"] == "771043317403"
+    assert payload["proNumber"] == "77137570910"
     assert payload["carrierCode"] == "SAI001"
     assert payload["billTo"] == 134034
-    assert payload["serviceLevel"] == "LTL"
-    assert payload["podName"] == "J SMITH"
-    assert payload["podDateTime"] == "2026-10-11T14:30:00Z"
+    assert payload["serviceLevel"] == "PPD"
+    assert payload["podName"] == "Received by-Shawn"
+    assert payload["podDateTime"] == "2026-09-15T12:13:00Z"
     assert payload["mlStatus"] == 2
     assert payload["mlStartDateTime"] == "2026-10-11T07:22:20Z"
     assert len(payload["events"]) == 3
-    ev = payload["events"][-1]
-    assert ev["code"] == "DL"
+    ev = payload["events"][0]
+    assert ev["code"] == "Delivered"
     assert ev["description"] == "Delivered"
-    assert ev["eventDateTime"] == "2026-10-11T14:30:00Z"
-    assert ev["timezone"] == "CST"
-    assert ev["lat"] == 29.76
-    assert ev["long"] == -95.37
+    assert ev["eventDateTime"] == "2026-09-15T12:13:00Z"
+    assert ev["timezone"] == "UTC"
+    assert ev["lat"] == 0
+    assert ev["long"] == 0
 
 
 def test_yaml_payload_map_override_is_respected():
     spec = SAIA.model_copy(deep=True)
     spec.activity.payload_map["serviceLevel"] = "=STD"
-    result = normalize(spec, FULL, "771043317403", "PRO", ACCT)
+    result = normalize(spec, FULL, "77137570910", "PRO", ACCT)
     payload = build_add_carrier_activity(
-        _job(), result, outcome="found", summary={},
+        _job("HB123", "77137570910"), result, outcome="found", summary={},
         ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=spec,
     )
     assert payload["serviceLevel"] == "STD"
@@ -109,20 +110,20 @@ def test_yaml_payload_map_override_is_respected():
 
 def test_extra_mapping_field_flows_into_payload_without_model_change():
     spec = SAIA.model_copy(deep=True)
-    spec.mapping.fields["driver"] = "delivery.signedBy"
+    spec.mapping.fields["driver"] = "deliveryInformation.signature"
     spec.activity.payload_map["reference"] = "driver"
-    result = normalize(spec, FULL, "771043317403", "PRO", ACCT)
-    assert result.driver == "J SMITH"
+    result = normalize(spec, FULL, "77137570910", "PRO", ACCT)
+    assert result.driver == "Received by-Shawn"
     payload = build_add_carrier_activity(
-        _job(), result, outcome="found", summary={},
+        _job("HB123", "77137570910"), result, outcome="found", summary={},
         ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=spec,
     )
-    assert payload["reference"] == "J SMITH"
+    assert payload["reference"] == "Received by-Shawn"
 
 
 def test_scraper_prefers_find_full_details_over_find_by_pro(tmp_path):
-    pro = "771043317403"
-    entered = "77104331740"
+    pro = "77137570910"
+    entered = "77137570910"
     summary = [{"referenceNumbers": {"proNumber": pro}, "shipment": {"status": "In Transit"}}]
     session = MockSession({
         entered: [
@@ -150,7 +151,7 @@ def test_scraper_prefers_find_full_details_over_find_by_pro(tmp_path):
     assert outcome.missing == []
     raw = outcome.received[pro]
     assert raw.get("history")
-    assert raw["shipment"]["status"] == "Delivered"
+    assert raw["shipmentInformation"]["status"] == "Delivered"
 
 
 def test_estes_fixture_still_maps_events():
