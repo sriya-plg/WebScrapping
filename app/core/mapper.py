@@ -1,6 +1,7 @@
 """Pure functions (no I/O): raw carrier JSON -> common schema -> backend payload.
-Stage 1 (carrier-specific):  normalize()      explicit mapping.yaml paths, auto-detection fills the gaps
-Stage 2 (client-specific):   build_payload()  client.yaml payload_map (+ optional hooks.py)"""
+Stage 1 (carrier-specific):  normalize()      mapping.yaml fields/events (auto-detection fills gaps)
+Stage 2 (client-specific):   apply_map()      client.yaml payload_map / activity.payload_map / events_map
+                                             (+ optional hooks.py)"""
 from __future__ import annotations
 
 import importlib
@@ -53,6 +54,9 @@ _FIELD_RX = {k: re.compile(v) for k, v in {
                    r"consigneelocation|consigneecity|dest)$",
     "pieces": r"^(pieces|piececount|pcs|totalpieces|handlingunits|handlingunitcount)$",
     "weight": r"^(weight|totalweight|grossweight|shipmentweight)$",
+    "service_level": r"^(servicelevel|servicetype|service)$",
+    "pod_name": r"^(podname|signedby|signature|receivedby|signee|podsignature)$",
+    "pod_datetime": r"^(poddatetime|poddate|signeddate|deliverysignaturedate)$",
 }.items()}
 _EV_LIST_RX = re.compile(r"(history|events?|activity|activities|trace|tracking|milestones?|scans?|statuses|"
                          r"details|checkpoints?|progress)")
@@ -62,6 +66,10 @@ _EV_CANDIDATES = {
                     "statusdescription", "status", "text"],
     "location": ["location", "eventlocation", "city", "terminal", "facility", "site", "place"],
     "status": ["status", "statuscode", "eventtype", "type"],
+    "code": ["code", "statuscode", "eventcode", "eventtype", "type"],
+    "timezone": ["timezone", "tz", "timezonename"],
+    "lat": ["lat", "latitude"],
+    "long": ["long", "lng", "longitude"],
 }
 
 
@@ -165,9 +173,9 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
                 vals[f] = v
                 notes.append(f"auto:{f}<-{p}")
     events: list[TrackingEvent] = []
-    if m.events:
+    if m.events and m.events.get("path"):
         flds = m.events.get("fields", {})
-        events = [TrackingEvent(**{f: get_path(it, p) for f, p in flds.items()})
+        events = [TrackingEvent(**{f: get_path(it, p) for f, p in flds.items() if f and p})
                   for it in (get_path(raw, m.events["path"], []) or [])]
     elif m.auto and (found := auto_events(raw)):
         events = found[1]
@@ -189,6 +197,16 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
 
 
 # --------------------------------------------------------------------------------------- stage 2
+def apply_map(data: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
+    """Apply a YAML map of output_key -> dotted path or `=literal`."""
+    payload: dict[str, Any] = {}
+    for key, path in (mapping or {}).items():
+        if not key or path is None or path == "":
+            continue
+        payload[key] = path[1:] if str(path).startswith("=") else get_path(data, str(path))
+    return payload
+
+
 def _load_hook(path: str):
     mod, fn = path.split(":")
     return getattr(importlib.import_module(mod), fn)
@@ -199,9 +217,7 @@ def build_payload(spec: CarrierSpec, result: TrackingResult, account: CarrierAcc
     data = result.model_dump(mode="json", exclude={"raw"})
     data["ctx"] = {"bill_to": account.bill_to, "carrier_code": spec.code, "client": spec.client,
                    "customer_name": account.customer_name, "run_id": run_id, **(meta or {})}
-    payload: dict[str, Any] = {}
-    for key, path in spec.payload_map.items():
-        payload[key] = path[1:] if path.startswith("=") else get_path(data, path)
+    payload = apply_map(data, spec.payload_map)
     if spec.post_hook:
         payload = _load_hook(spec.post_hook)(payload, result, account) or payload
     return payload

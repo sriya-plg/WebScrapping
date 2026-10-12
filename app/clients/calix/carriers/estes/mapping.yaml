@@ -76,6 +76,9 @@ mapping:
     destination: data.0.consignee.address.city|shipment.destination
     pieces: data.0.piecesCount|shipment.pieces
     weight: data.0.totalWeight|shipment.weight
+    service_level: data.0.serviceLevel|data.0.service|shipment.serviceLevel
+    pod_name: data.0.podName|data.0.signedBy|data.0.delivery.signedBy
+    pod_datetime: data.0.deliveryDate|data.0.podDateTime|shipment.deliveryDate
   events:
     path: data.0.movementHistory|history
     fields:
@@ -83,6 +86,10 @@ mapping:
       description: description
       location: location.name|location
       status: statusHistory.0.expandedStatus|status
+      code: statusHistory.0.statusCode|statusCode|status
+      timezone: timezone|tz
+      lat: latitude|lat
+      long: longitude|lng|long
   status_map:
     Delivered: DELIVERED
     "Delivery Completed - OK": DELIVERED

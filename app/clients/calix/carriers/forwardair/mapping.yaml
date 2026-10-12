@@ -70,6 +70,9 @@ mapping:
     destination: destinationName|Destination
     pieces: Pieces
     weight: Weight
+    service_level: ServiceLevel|Service
+    pod_name: PodName|SignedBy|Signature
+    pod_datetime: PodDate
   events:
     path: Statuses
     fields:
@@ -77,6 +80,10 @@ mapping:
       timestamp: RecordDate
       location: AirportCode
       description: StatusDescription
+      code: StatusCode|StatusDescription
+      timezone: Timezone|tz
+      lat: Latitude|lat
+      long: Longitude|lng|long
   status_map:
     Delivered: DELIVERED
     Recovered: DELIVERED

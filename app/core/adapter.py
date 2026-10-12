@@ -305,6 +305,11 @@ class GenericAdapter(CarrierAdapter):
         cands = [g for g in got if g.status == 200 and isinstance(g.json, (dict, list)) and (not rx or rx.search(g.url))]
         if site.match_ref:
             cands = [g for g in cands if _contains_ref(g.json, key)]
+        if site.response_url_prefer:
+            prefer = re.compile(site.response_url_prefer)
+            preferred = [g for g in cands if prefer.search(g.url)]
+            if preferred:
+                cands = preferred
         return max(cands, key=lambda g: len(json.dumps(g.json)), default=None)   # richest match
 
     async def _raise_for_miss(self, got: list[CapturedResponse], ref: str) -> None:

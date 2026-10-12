@@ -1,15 +1,11 @@
 # Calix x Saia
 #
-# client.yaml (Calix folder)
-#   billTo codes, pending API shape, payload_map -> Pegasus/backend field names
-#
-# mapping.yaml (this file)
-#   mapping.*     : carrier JSON -> common TrackingResult (used when posting results)
-#   site.*        : how BatchScraper drives saia.com (selectors, network pattern, login)
-#   browser/limits: automation profile (not hardcoded in Python; per-carrier overrides)
-#
-# adapter.py      : optional; Cloudflare wait + reCAPTCHA on the AccountJob/adapter path only.
-#                   HTTP run-once today uses BatchScraper + site.* below (not adapter.py).
+# How mapping works (all carriers, including future ones):
+#   1. site.response_url_*   capture the carrier's network JSON (prefer the complete API)
+#   2. mapping.fields/events  carrier JSON -> TrackingResult  (edit dotted paths here)
+#   3. client.yaml activity.* TrackingResult + ctx -> AddCarrierActivity
+# Use `|` for first-non-empty fallbacks so find-full-details and find-by-pro can share one map.
+# `=literal` in activity.payload_map pins a constant (see client.yaml).
 
 aliases: [SAIA_LTL, SAI001]
 
@@ -41,14 +37,15 @@ site:
   delimiter: "\n"
   batch_size: 30
 
-  response_url_pattern: /api/v1/tracking/find-by-pro-number
+  # Capture both APIs; prefer the complete payload when the page also calls it.
+  response_url_pattern: '(?i)/api/v1/tracking/(find-full-details?|find-by-pro-number)'
+  response_url_prefer: find-full-detail
   expected_response_shape: single_batch
   response_pro_path: "[].referenceNumbers.proNumber"
   strip_spaces_dashes: true
   extra:
     # Saia UI: enter 11-digit PROs (drop the 12th check digit from the backend value).
     pro_input_digits: 11
-    # Batch-only search (same knobs as Estes; per-carrier in mapping.yaml, not global Python).
     retry_missing_individually: false
     single_batch_unmatched_is_not_found: true
     return_to_tracking_after_submit: true
@@ -86,6 +83,22 @@ mapping:
     eta: "delivery.expectedDate|[0].delivery.expectedDate"
     origin: "shipper.companyName|[0].shipper.companyName|shipper.address.city"
     destination: "consignee.companyName|[0].consignee.companyName|consignee.address.city"
+    pieces: "shipment.pieces|[0].shipment.pieces"
+    weight: "shipment.weight|[0].shipment.weight"
+    service_level: "shipment.serviceLevel|shipment.service|[0].shipment.serviceLevel"
+    pod_name: "delivery.signedBy|delivery.podName|delivery.signature|[0].delivery.signedBy"
+    pod_datetime: "delivery.deliveredDate|delivery.podDateTime|[0].delivery.deliveredDate"
+  events:
+    path: "history|trackingHistory|statusHistory|events|[0].history"
+    fields:
+      timestamp: date|eventDate|eventDateTime|datetime|timestamp
+      description: description|statusDescription|activity
+      location: city|location
+      status: status|statusDescription
+      code: statusCode|code|status
+      timezone: timezone|tz
+      lat: latitude|lat
+      long: longitude|lng|long
   status_map:
     Delivered: DELIVERED
     "Delivery Completed - OK": DELIVERED

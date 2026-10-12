@@ -503,18 +503,30 @@ class BatchScraper:
             await self._delay(site.action_min_delay_s, site.action_max_delay_s)
         await self._handle_recaptcha(session, spec)
 
+        prefer_rx = re.compile(site.response_url_prefer) if site.response_url_prefer else None
+
         def matching(responses: list[CapturedResponse]) -> list[CapturedResponse]:
             return [response for response in responses if pattern.search(response.url)]
+
+        def is_preferred(response: CapturedResponse) -> bool:
+            return bool(prefer_rx and prefer_rx.search(response.url))
 
         batch_collect = bool((site.extra or {}).get("batch_collect_all_responses"))
 
         def complete(responses: list[CapturedResponse]) -> bool:
+            matches = matching(responses)
             if site.expected_response_shape == "single_batch":
-                return bool(matching(responses))
+                if not matches:
+                    return False
+                # Keep listening until the preferred (full-details) API arrives; capture_all
+                # still falls back to quiet/timeout so find-by-pro is used if details never fire.
+                if prefer_rx and not any(is_preferred(response) for response in matches):
+                    return False
+                return True
             if batch_collect:
                 return False
             found = set()
-            for response in matching(responses):
+            for response in matches:
                 found.update(self._pro_keys_from_response(response, spec, keys, site))
             return set(keys).issubset(found)
 
@@ -531,6 +543,10 @@ class BatchScraper:
             timeout_s=site.response_timeout_s, settle_s=site.idle_window_s,
             until=complete)
         matches = matching(responses)
+        if prefer_rx:
+            # Summary APIs first, preferred/full-details last so they overwrite per PRO
+            # without the details response marking the rest of the chunk as not_found.
+            matches = sorted(matches, key=lambda response: 1 if is_preferred(response) else 0)
         if not matches and responses and (site.extra or {}).get("response_match_loose_json"):
             for response in responses:
                 if self._pro_keys_from_response(response, spec, keys, site):
@@ -557,7 +573,8 @@ class BatchScraper:
         for response in matches:
             if site.expected_response_shape == "single_batch":
                 if self._assign_single_batch_response(
-                    response, spec, keys, site, received, outcomes, summaries):
+                    response, spec, keys, site, received, outcomes, summaries,
+                    allow_unmatched_not_found=not is_preferred(response)):
                     continue
             found = self._pro_keys_from_response(response, spec, keys, site)
             if site.expected_response_shape == "single_batch" and not found:
@@ -588,6 +605,7 @@ class BatchScraper:
         received: dict[str, Any],
         outcomes: dict[str, CaptureOutcome],
         summaries: dict[str, dict[str, Any]],
+        allow_unmatched_not_found: bool = True,
     ) -> bool:
         """Map one Saia-style batch API payload (top-level JSON array) onto each PRO in the chunk."""
         raw = response.json
@@ -613,7 +631,7 @@ class BatchScraper:
                 matched.add(normalized)
                 self._record_pro_response(keys[normalized], item, spec, received, outcomes, summaries)
         if matched:
-            if (site.extra or {}).get("single_batch_unmatched_is_not_found"):
+            if allow_unmatched_not_found and (site.extra or {}).get("single_batch_unmatched_is_not_found"):
                 unmatched = set(keys) - matched
                 for normalized in unmatched:
                     pro = keys[normalized]

@@ -7,11 +7,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from app.core.mapper import normalize
+from app.core.mapper import apply_map, get_path, normalize
 from app.core.scraper import ScrapeBatchResult
 from app.logging_setup import log
 from app.models import CarrierAccount, CarrierConfig, TrackingJob, TrackingResult
-from app.settings import CarrierSpec
+from app.settings import ActivityConfig, CarrierSpec
 
 import httpx
 
@@ -69,21 +69,90 @@ def pegasus_datetime(value: datetime | str | None, *, fallback: datetime | None 
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _activity_events(result: TrackingResult | None) -> list[dict[str, Any]]:
+_STRING_PAYLOAD_KEYS = {
+    "housebill", "proNumber", "carrierCode", "serviceLevel", "mlLog", "mlError",
+    "reference", "podName", "mlStartDateTime", "mlEndDateTime", "podDateTime",
+}
+_DATETIME_PAYLOAD_KEYS = {"mlStartDateTime", "mlEndDateTime", "podDateTime"}
+
+
+def _pod_from_result(result: TrackingResult | None) -> tuple[str, str]:
+    if not result:
+        return "", ""
+    pod_name = (result.pod_name or "").strip()
+    pod_dt = (result.pod_datetime or "").strip()
+    if result.delivered:
+        if not pod_dt:
+            pod_dt = result.delivery_date or result.scraped_at or ""
+        if not pod_name:
+            for event in reversed(result.events):
+                if event.description:
+                    pod_name = event.description[:256]
+                    if not pod_dt and event.timestamp:
+                        pod_dt = event.timestamp
+                    break
+    return pod_name, pod_dt
+
+
+def _activity_events(
+    result: TrackingResult | None,
+    events_map: dict[str, str],
+    *,
+    fallback: datetime,
+) -> list[dict[str, Any]]:
     if not result:
         return []
     out: list[dict[str, Any]] = []
     for event in result.events:
-        out.append({
-            "code": (event.status or "EVENT")[:64],
-            "description": event.description or "",
-            "eventDateTime": pegasus_datetime(
-                event.timestamp or result.scraped_at, fallback=datetime.now(timezone.utc)),
-            "timezone": "UTC",
-            "lat": 0,
-            "long": 0,
-        })
+        item = apply_map(event.model_dump(mode="json"), events_map)
+        code = item.get("code") or event.status or "EVENT"
+        item["code"] = str(code)[:64]
+        item["description"] = item.get("description") or ""
+        item["eventDateTime"] = pegasus_datetime(
+            item.get("eventDateTime") or event.timestamp or result.scraped_at,
+            fallback=fallback,
+        )
+        item["timezone"] = item.get("timezone") or "UTC"
+        if item.get("lat") in (None, ""):
+            item["lat"] = 0
+        if item.get("long") in (None, ""):
+            item["long"] = 0
+        out.append(item)
     return out
+
+
+def _activity_ctx(
+    job: TrackingJob,
+    result: TrackingResult | None,
+    *,
+    ml_start: datetime,
+    ml_end: datetime,
+    ml_status: int,
+    ml_log: str,
+    ml_error: str,
+) -> dict[str, Any]:
+    bill_to = job.carrier.bill_to
+    try:
+        bill_to = int(bill_to)
+    except (TypeError, ValueError):
+        pass
+    pod_name, pod_dt = _pod_from_result(result)
+    return {
+        "housebill": str(job.shipment.housebill or ""),
+        "pro_number": str(job.shipment.pro_number or job.search_value or ""),
+        "carrier_code": str(job.carrier.carrier_code or ""),
+        "bill_to": bill_to,
+        "ml_status": ml_status,
+        "ml_log": (ml_log or "")[:2000],
+        "ml_start": pegasus_datetime(ml_start),
+        "ml_end": pegasus_datetime(ml_end),
+        "ml_process_time": max(0, int((ml_end - ml_start).total_seconds() * 1000)),
+        "ml_error": (ml_error or "")[:2000],
+        "service_level": (result.service_level if result else None) or "",
+        "pod_name": pod_name,
+        "pod_datetime": pegasus_datetime(pod_dt or None, fallback=ml_end),
+        "reference": (result.reference if result else job.search_value) or "",
+    }
 
 
 def build_add_carrier_activity(
@@ -97,40 +166,44 @@ def build_add_carrier_activity(
     ml_status: int,
     ml_log: str,
     ml_error: str = "",
+    spec: CarrierSpec | None = None,
 ) -> dict[str, Any]:
-    bill_to = job.carrier.bill_to
-    try:
-        bill_to = int(bill_to)
-    except (TypeError, ValueError):
-        pass
-    pod_name = ""
-    pod_dt = ""
-    if result and result.delivered:
-        pod_dt = result.delivery_date or result.scraped_at
-        for event in reversed(result.events):
-            if event.description:
-                pod_name = event.description[:256]
-                if event.timestamp:
-                    pod_dt = event.timestamp
-                break
-    pod_fallback = datetime.now(timezone.utc)
-    return {
-        "housebill": str(job.shipment.housebill or ""),
-        "proNumber": str(job.shipment.pro_number or job.search_value or ""),
-        "carrierCode": str(job.carrier.carrier_code or ""),
-        "serviceLevel": "",
-        "billTo": bill_to,
-        "mlStatus": ml_status,
-        "mlLog": (ml_log or "")[:2000],
-        "mlStartDateTime": pegasus_datetime(ml_start),
-        "mlEndDateTime": pegasus_datetime(ml_end),
-        "mlProcessTime": max(0, int((ml_end - ml_start).total_seconds() * 1000)),
-        "mlError": (ml_error or "")[:2000],
-        "reference": (result.reference if result else job.search_value) or "",
-        "podName": pod_name,
-        "podDateTime": pegasus_datetime(pod_dt or None, fallback=ml_end),
-        "events": _activity_events(result),
-    }
+    """Build the AddCarrierActivity body from YAML `activity.payload_map` / `events_map`.
+
+    Runtime scrape fields (mlStatus, timestamps, housebill, ...) live on `ctx.*`.
+    Carrier-mapped fields (service_level, pod_*, events) come from TrackingResult.
+    Change paths in client.yaml or the carrier mapping.yaml — not this function.
+    """
+    ctx = _activity_ctx(
+        job, result, ml_start=ml_start, ml_end=ml_end,
+        ml_status=ml_status, ml_log=ml_log, ml_error=ml_error,
+    )
+    data: dict[str, Any] = dict(ctx)
+    if result:
+        dumped = result.model_dump(mode="json", exclude={"raw"})
+        dumped.pop("events", None)
+        data.update(dumped)
+    data["ctx"] = ctx
+    # YAML-mapped values win for carrier fields; ctx keeps scrape metadata.
+    data["service_level"] = get_path(data, "service_level") or ctx["service_level"]
+    data["pod_name"] = get_path(data, "pod_name") or ctx["pod_name"]
+    data["pod_datetime"] = get_path(data, "pod_datetime") or ctx["pod_datetime"]
+    data["reference"] = get_path(data, "reference") or ctx["reference"]
+
+    activity = spec.activity if spec is not None else ActivityConfig()
+    payload = apply_map(data, activity.payload_map)
+    for key in _STRING_PAYLOAD_KEYS:
+        if key in payload and payload[key] is None:
+            payload[key] = ""
+    for key in _DATETIME_PAYLOAD_KEYS:
+        if key in payload:
+            payload[key] = pegasus_datetime(payload[key] or None, fallback=ml_end)
+    if "mlLog" in payload:
+        payload["mlLog"] = str(payload["mlLog"] or "")[:2000]
+    if "mlError" in payload:
+        payload["mlError"] = str(payload["mlError"] or "")[:2000]
+    payload["events"] = _activity_events(result, activity.events_map, fallback=ml_end)
+    return payload
 
 
 def _normalize_raw(raw: Any) -> dict[str, Any]:
@@ -206,7 +279,7 @@ async def post_scrape_activities(
         payload = build_add_carrier_activity(
             job, result, outcome=outcome_type, summary=summary,
             ml_start=batch_start, ml_end=ml_end, ml_status=ml_status,
-            ml_log=ml_log, ml_error=ml_error,
+            ml_log=ml_log, ml_error=ml_error, spec=spec,
         )
 
         status_label = result.status if result else "UNKNOWN"

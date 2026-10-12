@@ -37,6 +37,9 @@ def extracted_summary(result: TrackingResult | None) -> dict[str, Any]:
         "eta": result.eta,
         "pieces": result.pieces,
         "weight": result.weight,
+        "service_level": result.service_level,
+        "pod_name": result.pod_name,
+        "pod_datetime": result.pod_datetime,
         "events": len(result.events),
     }
 

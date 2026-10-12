@@ -91,11 +91,17 @@ class PendingBatch(BaseModel):
 
 
 class TrackingEvent(BaseModel):
-    model_config = ConfigDict(coerce_numbers_to_str=True)
+    """Canonical event. Extra keys from mapping.yaml are kept (extra=allow) so new
+    carrier fields can be mapped to the backend payload without a code change."""
+    model_config = ConfigDict(coerce_numbers_to_str=True, extra="allow")
     timestamp: str | None = None
     description: str | None = None
     location: str | None = None
     status: str | None = None
+    code: str | None = None
+    timezone: str | None = None
+    lat: float | None = None
+    long: float | None = None
 
 
 def _num(v: Any) -> float | None:
@@ -108,8 +114,12 @@ def _num(v: Any) -> float | None:
 
 
 class TrackingResult(BaseModel):
-    """Common schema every adapter normalizes into."""
-    model_config = ConfigDict(coerce_numbers_to_str=True)
+    """Common schema every adapter normalizes into.
+
+    Extra keys from mapping.yaml `fields:` are kept (extra=allow) so a new carrier
+    field can be mapped through YAML into AddCarrierActivity without changing models.
+    """
+    model_config = ConfigDict(coerce_numbers_to_str=True, extra="allow")
     reference: str
     ref_type: str
     carrier_code: str
@@ -124,6 +134,9 @@ class TrackingResult(BaseModel):
     destination: str | None = None
     pieces: int | None = None
     weight: float | None = None
+    service_level: str | None = None
+    pod_name: str | None = None
+    pod_datetime: str | None = None
     events: list[TrackingEvent] = []
     scraped_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     raw: dict[str, Any] = {}

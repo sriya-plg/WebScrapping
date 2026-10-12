@@ -372,6 +372,41 @@ def test_saia_root_array_maps_each_pro(tmp_path):
     assert result.outcomes["771043317403"] == "found"
 
 
+def test_preferred_full_details_overwrites_summary_without_wiping_siblings(tmp_path):
+    summary = [
+        {"referenceNumbers": {"proNumber": "771043317403"}, "shipment": {"status": "In Transit"}},
+        {"referenceNumbers": {"proNumber": "771045181604"}, "shipment": {"status": "In Transit"}},
+    ]
+    details = {
+        "referenceNumbers": {"proNumber": "771043317403"},
+        "shipment": {"status": "Delivered"},
+        "history": [{"date": "2026-10-11T14:30:00", "description": "Delivered", "status": "Delivered"}],
+    }
+    entered = "\n".join(["77104331740", "77104518160"])
+    session = MockSession({
+        entered: [
+            CapturedResponse("https://www.saia.com/api/v1/tracking/find-by-pro-number", 200, summary),
+            CapturedResponse("https://www.saia.com/api/v1/tracking/find-full-details", 200, details),
+        ]
+    })
+    spec = make_spec("single_batch", batch_size=2)
+    spec.site.response_url_pattern = "(?i)find-full-details?|find-by-pro-number"
+    spec.site.response_url_prefer = "find-full-detail"
+    spec.site.response_pro_path = "[].referenceNumbers.proNumber"
+    spec.site.extra = {
+        "pro_input_digits": 11,
+        "retry_missing_individually": False,
+        "single_batch_unmatched_is_not_found": True,
+    }
+    result = asyncio.run(BatchScraper(MockProvider(session), spec, str(tmp_path)).run_batch(
+        make_jobs(["771043317403", "771045181604"]), spec))
+    assert result.missing == []
+    assert result.received["771043317403"]["shipment"]["status"] == "Delivered"
+    assert result.received["771043317403"]["history"]
+    assert result.received["771045181604"]["shipment"]["status"] == "In Transit"
+    assert result.outcomes["771045181604"] == "found"
+
+
 def test_saia_empty_array_records_not_found_per_pro(tmp_path):
     session = MockSession(
         {"77104331740": [CapturedResponse("https://www.saia.com/api/v1/tracking/find-by-pro-number", 200, [])]}

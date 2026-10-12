@@ -1,0 +1,57 @@
+{
+  "referenceNumbers": {
+    "proNumber": "771043317403"
+  },
+  "shipment": {
+    "status": "Delivered",
+    "pickupDate": "2026-10-08T08:00:00",
+    "pieces": 3,
+    "weight": 450,
+    "serviceLevel": "LTL"
+  },
+  "delivery": {
+    "deliveredDate": "2026-10-11T14:30:00",
+    "expectedDate": "2026-10-11",
+    "signedBy": "J SMITH"
+  },
+  "shipper": {
+    "companyName": "[SANITIZED SHIPPER]",
+    "address": { "city": "Dallas", "state": "TX" }
+  },
+  "consignee": {
+    "companyName": "[SANITIZED CONSIGNEE]",
+    "address": { "city": "Houston", "state": "TX" }
+  },
+  "history": [
+    {
+      "status": "Picked Up",
+      "statusCode": "PU",
+      "date": "2026-10-08T08:00:00",
+      "description": "Shipment picked up",
+      "city": "Dallas",
+      "timezone": "CST",
+      "latitude": 32.78,
+      "longitude": -96.8
+    },
+    {
+      "status": "In Transit",
+      "statusCode": "IT",
+      "date": "2026-10-09T11:15:00",
+      "description": "Departed terminal",
+      "city": "Dallas",
+      "timezone": "CST",
+      "latitude": 32.78,
+      "longitude": -96.8
+    },
+    {
+      "status": "Delivered",
+      "statusCode": "DL",
+      "date": "2026-10-11T14:30:00",
+      "description": "Delivered",
+      "city": "Houston",
+      "timezone": "CST",
+      "latitude": 29.76,
+      "longitude": -95.37
+    }
+  ]
+}
