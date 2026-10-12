@@ -27,6 +27,8 @@ def get_path(obj: Any, path: str, default: Any = None) -> Any:
                     break
             elif isinstance(cur, dict) and part in cur:
                 cur = cur[part]
+            elif isinstance(cur, dict) and part.strip("[]").isdigit() and int(part.strip("[]")) == 0:
+                continue
             else:
                 ok = False
                 break

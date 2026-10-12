@@ -98,7 +98,7 @@ class _PWSession(BrowserSession):
             await target.click()
             await target.fill("")
         else:
-            await target.click()
+            await target.focus()
         if not text:
             return
         if delay_ms > 0:
