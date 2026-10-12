@@ -191,6 +191,10 @@ class HttpBackend(BackendClient):
         refs = []
         skipped = 0
         for row in rows:
+            row_code = (row.carrier_code or "").strip().casefold()
+            if row_code and row_code != str(spec.code).strip().casefold():
+                skipped += 1
+                continue
             search_by = account.search_by or "proNumber"
             value = str(getattr(row, search_by, None) or getattr(row, {
                 "proNumber": "pro_number", "housebill": "housebill", "vendorId": "vendor_id"
