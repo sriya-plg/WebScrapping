@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import re
@@ -471,6 +472,12 @@ class BatchScraper:
         log(logger, logging.INFO, "tracking response recorded",
             pro=pro, outcome=outcome, error_code=summary.get("error_code"),
             error_message=summary.get("error_message"), data_count=summary.get("data_count"))
+        if raw:
+            try:
+                pretty = json.dumps(raw, indent=2, default=str)
+                logger.info("extracted JSON [pro=%s outcome=%s]:\n%s", pro, outcome, pretty)
+            except Exception:
+                pass
 
     async def _submit(self, session: BrowserSession, chunk: list[TrackingJob], spec: CarrierSpec,
                       pattern: re.Pattern, keys: dict[str, str], received: dict[str, Any],
