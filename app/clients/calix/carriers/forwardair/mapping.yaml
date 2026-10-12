@@ -59,6 +59,11 @@ site:
       - "#onetrust-reject-all-handler"
       - "#onetrust-accept-btn-handler"
 
+activity:
+  events_map:
+    # TimeZoneCode converts RecordDate / PodDate to UTC. Do not post it.
+    timezone: ""
+
 mapping:
   auto: true
   fields:
@@ -71,7 +76,8 @@ mapping:
     pieces: Pieces
     weight: Weight
     service_level: ServiceLevel|Service
-    pod_name: PodName|SignedBy|Signature
+    # PodSignedBy -> podName. AirbillNumber -> reference (Calix housebill stays the pending-order id).
+    pod_name: PodSignedBy|PodName|SignedBy|Signature
     pod_datetime: PodDate
   events:
     path: Statuses
@@ -80,8 +86,8 @@ mapping:
       timestamp: RecordDate
       location: AirportCode
       description: StatusDescription
-      code: StatusCode|StatusDescription
-      timezone: Timezone|tz
+      code: statusCode|StatusCode|StatusDescription
+      timezone: TimeZoneCode|Timezone|tz
       lat: Latitude|lat
       long: Longitude|lng|long
   status_map:

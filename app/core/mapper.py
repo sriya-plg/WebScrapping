@@ -7,8 +7,9 @@ from __future__ import annotations
 import importlib
 import re
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.models import CarrierAccount, TrackingEvent, TrackingResult
 from app.settings import CarrierSpec
@@ -88,6 +89,11 @@ def parse_loose_datetime(value: Any) -> str | None:
         "%Y-%m-%d %I:%M %p",
         "%Y-%m-%d %I:%M%p",
         "%Y-%m-%d",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y %I:%M %p",
+        "%m/%d/%Y %I:%M%p",
+        "%m/%d/%Y",
     ):
         try:
             return datetime.strptime(text, fmt).isoformat()
@@ -224,6 +230,83 @@ def status_from_text(text: str, status_map: dict[str, str]) -> str:
     return "UNKNOWN"
 
 
+# Forward Air sends TimeZoneCode (ET/CT/MT/PT) beside a clock time that has no offset.
+_TZ_ABBREV = {
+    "ET": "America/New_York",
+    "EST": "America/New_York",
+    "EDT": "America/New_York",
+    "CT": "America/Chicago",
+    "CST": "America/Chicago",
+    "CDT": "America/Chicago",
+    "MT": "America/Denver",
+    "MST": "America/Denver",
+    "MDT": "America/Denver",
+    "PT": "America/Los_Angeles",
+    "PST": "America/Los_Angeles",
+    "PDT": "America/Los_Angeles",
+}
+
+
+# Standard-time UTC offset (hours) for the zones above, used only when the system
+# timezone database is unavailable (Windows without the tzdata package).
+_US_STANDARD_OFFSET_HOURS = {
+    "America/New_York": -5,
+    "America/Chicago": -6,
+    "America/Denver": -7,
+    "America/Los_Angeles": -8,
+}
+
+
+def _nth_sunday(year: int, month: int, nth: int) -> datetime:
+    first = datetime(year, month, 1)
+    first_sunday = 1 + (6 - first.weekday()) % 7
+    return datetime(year, month, first_sunday + 7 * (nth - 1))
+
+
+def _us_zone_fallback(zone_name: str, naive: datetime) -> timezone:
+    """US rules: DST runs from the second Sunday of March to the first Sunday of November, 02:00 local."""
+    standard = _US_STANDARD_OFFSET_HOURS[zone_name]
+    start = _nth_sunday(naive.year, 3, 2).replace(hour=2)
+    end = _nth_sunday(naive.year, 11, 1).replace(hour=2)
+    offset = standard + 1 if start <= naive < end else standard
+    return timezone(timedelta(hours=offset))
+
+
+def _zone_for(zone_name: str, naive: datetime):
+    try:
+        return ZoneInfo(zone_name)
+    except ZoneInfoNotFoundError:
+        return _us_zone_fallback(zone_name, naive)
+
+
+def apply_zone_abbrev(value: str | None, label: str | None) -> str | None:
+    """Attach a named zone to a naive timestamp so UTC conversion keeps that clock time."""
+    if value in (None, ""):
+        return value
+    zone_name = _TZ_ABBREV.get(str(label or "").strip().upper())
+    if not zone_name:
+        return value
+    parsed = parse_loose_datetime(value) or str(value)
+    try:
+        dt = datetime.fromisoformat(parsed)
+    except ValueError:
+        return value
+    if dt.tzinfo is not None:
+        return parsed
+    return dt.replace(tzinfo=_zone_for(zone_name, dt)).isoformat()
+
+
+def _delivery_zone_label(events: list[TrackingEvent]) -> str | None:
+    """Zone on the delivery scan. PodDate has no zone of its own; the DLV row does."""
+    for event in events:
+        code = str(event.code or "").strip().upper()
+        text = " ".join(part for part in (event.status, event.description) if part).lower()
+        if code == "DLV" or ("deliver" in text and "out for" not in text):
+            if event.timezone:
+                return event.timezone
+    return None
+
+
 def _time_sort_key(value: Any) -> tuple:
     text = "" if value in (None, "") else str(value)
     parsed = parse_loose_datetime(text) if text else None
@@ -342,8 +425,17 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
                 if offset:
                     data["timezone"] = offset.group(1)
             if raw_ts:
-                data["timestamp"] = parse_loose_datetime(raw_ts) or raw_ts
+                parsed_ts = parse_loose_datetime(raw_ts) or raw_ts
+                data["timestamp"] = apply_zone_abbrev(parsed_ts, data.get("timezone"))
             events.append(TrackingEvent(**data))
+        delivery_zone = _delivery_zone_label(events)
+        if delivery_zone:
+            zoned = apply_zone_abbrev(vals.get("pod_datetime"), delivery_zone)
+            if zoned:
+                vals["pod_datetime"] = zoned
+            zoned_delivery = apply_zone_abbrev(vals.get("delivery_date"), delivery_zone)
+            if zoned_delivery:
+                vals["delivery_date"] = zoned_delivery
     elif m.auto and (found := auto_events(raw)):
         events = found[1]
         notes.append(f"auto:events<-{found[0]}")

@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RES = load_resolver(ROOT / "app/clients")
 SAIA = RES.resolve("CALIX", "SAIA")
 ESTES = RES.resolve("CALIX", "ESTES")
+FORWARDAIR = RES.resolve("CALIX", "FORWARDAIR")
 ACCT = CarrierAccount(id=1, carrierName="Saia", carrierCode="SAIA", billTo="134034")
 FULL = json.loads((ROOT / "tests/fixtures/saia_find_full_details.json").read_text())
 SUMMARY = json.loads((ROOT / "tests/fixtures/saia_sample.json").read_text())
@@ -286,3 +287,99 @@ def test_estes_movement_history_maps_to_add_carrier_activity():
     assert payload["events"][2]["eventDateTime"] == "2026-10-07T02:37:45Z"
     assert payload["events"][-1]["description"] == "Delivery Completed - OK"
     assert payload["events"][-1]["eventDateTime"] == "2026-10-07T18:01:59Z"
+
+
+def _forwardair_job(housebill="23600001", pro="96765557") -> TrackingJob:
+    config = CarrierConfig(
+        id=1, carrierName="Forward Air", carrierCode="FORW-LTL",
+        trackingUrl="https://www.forwardair.com/tracking",
+        billTo=134034, customerName="Calix", isActive=True,
+    )
+    return TrackingJob(
+        carrier=config,
+        shipment=ShipmentRef(housebill=housebill, proNumber=pro, vendorId="FORW-LTL"),
+        search_by="proNumber", search_value=pro,
+    )
+
+
+def test_forwardair_sample_maps_pod_and_status_rows():
+    """PodSignedBy, PodDate, statusCode, RecordDate, StatusDescription, TimeZoneCode."""
+    raw = {
+        "CurrentStatusDescription": "Invoiced",
+        "PodSignedBy": "Jamie Chisholm",
+        "AirbillNumber": "96765557",
+        "PodDate": "07/31/2026 10:55",
+        "Origin": "DFW",
+        "Destination": "MEM",
+        "Pieces": 5,
+        "Weight": 2127,
+        "Statuses": [
+            {
+                "statusCode": "INVC",
+                "RecordDate": "08/03/2026 10:51",
+                "StatusDescription": "Invoiced",
+                "AirportCode": "GCY",
+                "TimeZoneCode": "ET",
+            },
+            {
+                "statusCode": "DLV",
+                "RecordDate": "07/31/2026 10:55",
+                "StatusDescription": "Delivered",
+                "AirportCode": "MEM",
+                "TimeZoneCode": "CT",
+            },
+            {
+                "statusCode": "PUP",
+                "RecordDate": "07/17/2026 23:13",
+                "StatusDescription": "Picked Up",
+                "AirportCode": "DFW",
+                "TimeZoneCode": "CT",
+            },
+        ],
+    }
+    acct = CarrierAccount(id=1, carrierName="Forward Air", carrierCode="FORWARDAIR", billTo="134034")
+    result = normalize(FORWARDAIR, raw, "96765557", "PRO", acct)
+    assert result.reference == "96765557"
+    assert result.pod_name == "Jamie Chisholm"
+    assert result.pod_datetime.startswith("2026-07-31T10:55:00-05:00")
+    assert [(e.code, e.description, e.timezone) for e in result.events] == [
+        ("INVC", "Invoiced", "ET"),
+        ("DLV", "Delivered", "CT"),
+        ("PUP", "Picked Up", "CT"),
+    ]
+
+    payload = build_add_carrier_activity(
+        _forwardair_job(), result, outcome="found", summary={},
+        ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=FORWARDAIR,
+    )
+    assert payload["housebill"] == "23600001"
+    assert payload["proNumber"] == "96765557"
+    assert payload["reference"] == "96765557"
+    assert payload["podName"] == "Jamie Chisholm"
+    assert payload["podDateTime"] == "2026-07-31T15:55:00Z"
+    assert payload["events"][0]["code"] == "INVC"
+    assert payload["events"][0]["description"] == "Invoiced"
+    assert "timezone" not in payload["events"][0]
+    assert payload["events"][0]["eventDateTime"] == "2026-08-03T14:51:00Z"
+    assert payload["events"][1]["code"] == "DLV"
+    assert payload["events"][1]["eventDateTime"] == "2026-07-31T15:55:00Z"
+    assert "timezone" not in payload["events"][1]
+    assert payload["events"][2]["eventDateTime"] == "2026-07-18T04:13:00Z"
+    assert all("timezone" not in ev for ev in payload["events"])
+
+
+def test_forwardair_maps_without_system_timezone_database(monkeypatch):
+    """Windows venvs without tzdata raised ZoneInfoNotFoundError and dropped every event."""
+    import app.core.mapper as mapper
+
+    def _missing(name):
+        raise mapper.ZoneInfoNotFoundError(name)
+
+    monkeypatch.setattr(mapper, "ZoneInfo", _missing)
+    assert mapper.apply_zone_abbrev("2026-07-31T10:55:00", "CT") == "2026-07-31T10:55:00-05:00"
+    assert mapper.apply_zone_abbrev("2026-08-03T10:51:00", "ET") == "2026-08-03T10:51:00-04:00"
+    assert mapper.apply_zone_abbrev("2026-01-15T09:00:00", "CT") == "2026-01-15T09:00:00-06:00"
+    assert mapper.apply_zone_abbrev("2026-03-08T01:59:00", "ET") == "2026-03-08T01:59:00-05:00"
+    assert mapper.apply_zone_abbrev("2026-03-08T02:00:00", "ET") == "2026-03-08T02:00:00-04:00"
+    assert mapper.apply_zone_abbrev("2026-11-01T01:59:00", "PT") == "2026-11-01T01:59:00-07:00"
+    assert mapper.apply_zone_abbrev("2026-11-01T02:00:00", "PT") == "2026-11-01T02:00:00-08:00"

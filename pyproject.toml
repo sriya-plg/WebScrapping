@@ -12,6 +12,7 @@ dependencies = [
     "playwright-stealth>=2.0.3",
     "pydantic>=2.13.5",
     "pyyaml>=6.0.3",
+    "tzdata>=2024.1",
 ]
 
 [dependency-groups]
