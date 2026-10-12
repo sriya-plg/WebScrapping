@@ -39,7 +39,8 @@ site:
 
   # Capture both APIs; prefer the complete payload when the page also calls it.
   response_url_pattern: '(?i)/api/v1/tracking/(find-full-details?|find-by-pro-number)'
-  response_url_prefer: find-full-detail
+  # find-by-pro-number (fullDetails=false) is the list; find-full-details only fires when a row is opened.
+  # Do NOT set response_url_prefer: it would make the batch wait for a response that never comes.
   expected_response_shape: single_batch
   response_pro_path: "[].proNumber|[].referenceNumbers.proNumber"
   strip_spaces_dashes: true
@@ -52,6 +53,10 @@ site:
     batch_collect_all_responses: true
     single_batch_item_pro_path: proNumber|referenceNumbers.proNumber
     landing_settle_s: 2.5
+    # Open each PRO row to trigger the per-PRO full-details API (overwrites the list data).
+    detail_response_pattern: '(?i)/api/v1/tracking/find-full-details'
+    # TODO: adjust if the PRO row is not plain text; {pro_rx} matches the PRO with any separators.
+    detail_click_selector: ':text-matches("{pro_rx}") >> nth=0'
 
   response_timeout_s: 45
   idle_window_s: 2
@@ -90,7 +95,7 @@ mapping:
     pod_datetime: "deliveryInformation.deliveryDate|delivery.deliveredDate|delivery.podDateTime"
   compose:
     # signature is POD name; delivery date + time.to is POD datetime
-    pod_datetime: "{deliveryInformation.deliveryDate} {deliveryInformation.deliveryTime.to}"
+    pod_datetime: "{deliveryInformation.deliveryDate|delivery.deliveredDate} {deliveryInformation.deliveryTime.to|delivery.deliveredTime}"
   events:
     path: "history|trackingHistory|statusHistory|events|[0].history"
     fields:

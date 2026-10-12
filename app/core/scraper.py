@@ -592,6 +592,62 @@ class BatchScraper:
             for normalized in found:
                 self._record_pro_response(keys[normalized], response.json, spec,
                                           received, outcomes, summaries)
+        await self._collect_full_details(session, spec, keys, received, outcomes, summaries)
+
+    async def _collect_full_details(self, session: BrowserSession, spec: CarrierSpec,
+                                    keys: dict[str, str], received: dict[str, Any],
+                                    outcomes: dict[str, CaptureOutcome],
+                                    summaries: dict[str, dict[str, Any]]) -> None:
+        """Open each found PRO's detail view and capture its full-details API response.
+
+        Enabled by site.extra.detail_response_pattern. The row to click comes from
+        site.extra.detail_click_selector ({pro} = digits as entered; {pro_rx} = regex that
+        tolerates separators between digits). The detail view is closed with
+        site.extra.detail_back_selector, or browser history back."""
+        site = spec.site
+        extra = site.extra or {}
+        pattern_text = extra.get("detail_response_pattern")
+        if not pattern_text:
+            return
+        rx = re.compile(pattern_text)
+        template = extra.get("detail_click_selector") or ':text-matches("{pro_rx}") >> nth=0'
+        settle = float(extra.get("detail_settle_s", 1.5))
+        timeout = float(extra.get("detail_timeout_s", 20))
+        for normalized, pro in keys.items():
+            if outcomes.get(pro) != "found":
+                continue
+            digits = normalized if normalized.isdigit() else _pro_digits(normalized)
+            pro_rx = r"\D*".join(digits)
+            selector = template.replace("{pro_rx}", pro_rx.replace("\\", "\\\\")).replace("{pro}", digits)
+            try:
+                async def _open() -> None:
+                    await session.click(selector)
+                got = await session.capture_all(
+                    _open, timeout_s=timeout, settle_s=settle,
+                    until=lambda rs: any(rx.search(r.url) and r.status == 200 for r in rs))
+                details = [r for r in got if rx.search(r.url) and r.status == 200 and r.json]
+                if not details:
+                    log(logger, logging.WARNING, "no full-details response after click",
+                        pro=pro, selector=selector)
+                else:
+                    one = {normalized: pro}
+                    for response in details:
+                        if not self._assign_single_batch_response(
+                                response, spec, one, site, received, outcomes, summaries,
+                                allow_unmatched_not_found=False):
+                            self._record_pro_response(pro, response.json, spec, received, outcomes, summaries)
+            except Exception as exc:
+                log(logger, logging.WARNING, "full-details capture failed",
+                    pro=pro, error=type(exc).__name__, detail=str(exc)[:200])
+            back = extra.get("detail_back_selector")
+            try:
+                if back and await session.is_visible(back):
+                    await session.click(back)
+                else:
+                    await session.evaluate("() => history.back()")
+            except Exception:
+                pass
+            await asyncio.sleep(float(extra.get("detail_back_settle_s", 1.0)))
 
     def _single_batch_item_pro_path(self, site) -> str:
         extra = site.extra or {}
