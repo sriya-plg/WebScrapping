@@ -1,11 +1,14 @@
 """Structured JSON logs with secret redaction (registered secrets + key=value patterns)."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import contextvars
 import json
 import logging
+from pathlib import Path
 import re
 import sys
+import uuid
 from datetime import datetime, timezone
 
 run_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("run_id", default="-")
@@ -81,7 +84,8 @@ class ConsoleFormatter(logging.Formatter):
         return line
 
 
-def setup_logging(level: str = "INFO", log_format: str = "console") -> None:
+def setup_logging(level: str = "INFO", log_format: str = "console", logs_dir: str | Path = "logs") -> None:
+    Path(logs_dir).mkdir(parents=True, exist_ok=True)
     h = logging.StreamHandler(sys.stdout)
     fmt = (log_format or "console").lower().strip()
     h.setFormatter(JsonFormatter() if fmt == "json" else ConsoleFormatter())
@@ -89,6 +93,42 @@ def setup_logging(level: str = "INFO", log_format: str = "console") -> None:
     root.handlers[:] = [h]
     root.setLevel(level)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+@contextmanager
+def run_file_logger(run_id: str | None = None, logs_dir: str | Path = "logs", level: str | None = None):
+    """Context manager attaching a per-run timestamped log file in logs_dir to root logger."""
+    p = Path(logs_dir)
+    p.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    rid = run_id or run_id_var.get()
+    if not rid or rid == "-":
+        rid = uuid.uuid4().hex[:12]
+        run_id_var.set(rid)
+
+    filename = f"run_{ts}_{rid}.log"
+    log_file = p / filename
+
+    handler = logging.FileHandler(str(log_file), encoding="utf-8")
+    handler.setFormatter(ConsoleFormatter())
+    if level:
+        handler.setLevel(level)
+
+    root = logging.getLogger()
+    orig_root_level = root.level
+    if root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    try:
+        yield log_file
+    finally:
+        try:
+            handler.flush()
+            root.removeHandler(handler)
+            handler.close()
+            root.setLevel(orig_root_level)
+        except Exception:
+            pass
 
 
 def log(logger: logging.Logger, level: int, msg: str, **fields) -> None:

@@ -244,6 +244,7 @@ class AlertSettings(_Strict):
 class AppSettings(_Strict):
     log_level: str = "INFO"
     log_format: Literal["console", "json"] = "console"
+    logs_dir: str = "logs"
     state_db: str = "state/tracker.db"
     state_dir: str = "state/browser"
     samples_dir: str = "state/samples"   # raw JSON saved when mapping fails / status unknown (to write mapping.yaml)

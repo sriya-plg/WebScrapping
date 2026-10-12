@@ -1,5 +1,6 @@
 log_level: INFO
 log_format: console   # console = readable lines; json = one JSON object per line
+logs_dir: logs
 state_db: state/tracker.db
 state_dir: state/browser
 debug_dir: state/debug
