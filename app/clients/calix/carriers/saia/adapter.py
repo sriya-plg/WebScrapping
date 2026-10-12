@@ -17,9 +17,53 @@ RECAPTCHA_ANCHOR_FRAME = 'iframe[title="reCAPTCHA"]:visible'
 RECAPTCHA_CHECKBOX = "#recaptcha-anchor"
 
 
+CONSENT_CLOSE_SELECTORS = (
+    "#onetrust-pc-sdk button.ot-close-icon",
+    "#onetrust-pc-sdk .ot-close-icon",
+    "#onetrust-close-btn-container button",
+    "#onetrust-banner-sdk #onetrust-reject-all-handler",
+    "#onetrust-banner-sdk #onetrust-accept-btn-handler",
+    "[role='dialog'] button[aria-label='Close' i]",
+    "[role='dialog'] button[title='Close' i]",
+    "[aria-modal='true'] button[aria-label='Close' i]",
+)
+
+
 class SaiaAdapter(GenericAdapter):
+    async def _dismiss_consent_dialog(self) -> None:
+        """Close Saia's 'Do Not Sell Or Share My Personal Information' / cookie dialog; it covers the form."""
+        page = getattr(self.session, "page", None)
+        if page is None:
+            return
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            for sel in CONSENT_CLOSE_SELECTORS:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible():
+                        await btn.click(timeout=3000)
+                        self.log.info("dismissed consent dialog via %s", sel)
+                        await asyncio.sleep(0.5)
+                        return
+                except Exception:
+                    continue
+            await asyncio.sleep(0.5)
+        try:  # fallback: dialog with the privacy heading -> click its close (x) or press Escape
+            dlg = page.locator("[role='dialog'], [aria-modal='true'], #onetrust-pc-sdk").filter(
+                has_text="Do Not Sell").first
+            if await dlg.is_visible():
+                close = dlg.locator("button:has-text('×'), button:has-text('✕'), button[class*='close' i]").first
+                if await close.count():
+                    await close.click(timeout=3000)
+                else:
+                    await page.keyboard.press("Escape")
+                self.log.info("dismissed consent dialog via fallback")
+        except Exception as exc:
+            self.log.debug("no consent dialog to dismiss: %s", exc)
+
     async def _on_landing(self) -> None:
         await self._clear_challenge()
+        await self._dismiss_consent_dialog()
         login = self.spec.site.login or self.spec.site.extra.get("login")
         if login and login.get("enabled", False):
             try:
@@ -44,6 +88,7 @@ class SaiaAdapter(GenericAdapter):
 
     async def _before_submit(self, ref: str) -> None:
         """Handle Saia Google reCAPTCHA checkbox before clicking submit."""
+        await self._dismiss_consent_dialog()
         await self._handle_recaptcha()
 
     async def _is_recaptcha_verified(self) -> bool:

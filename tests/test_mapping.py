@@ -94,7 +94,7 @@ def test_full_details_become_add_carrier_activity_payload():
     assert ev["code"] == "Delivered"
     assert ev["description"] == "Delivered"
     assert ev["eventDateTime"] == "2026-09-15T12:13:00Z"
-    assert ev["timezone"] == "UTC"
+    assert "timezone" not in ev
     assert ev["lat"] == 0
     assert ev["long"] == 0
 

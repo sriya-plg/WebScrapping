@@ -114,7 +114,10 @@ def _activity_events(
             item.get("eventDateTime") or event.timestamp or result.scraped_at,
             fallback=fallback,
         )
-        item["timezone"] = item.get("timezone") or "UTC"
+        if item.get("timezone"):
+            item["timezone"] = str(item["timezone"]).strip()
+        else:
+            item.pop("timezone", None)  # no timezone from carrier: omit the key
         if item.get("lat") in (None, ""):
             item["lat"] = 0
         if item.get("long") in (None, ""):
