@@ -442,3 +442,48 @@ def test_recaptcha_image_challenge_blocks_submission(tmp_path):
     # Verify that ChallengeError was recorded and not submitted as success
     assert any("ChallengeError" in err.get("type", "") for err in result.errors)
 
+
+def test_gradual_human_typing_enters_chunks_with_delays(tmp_path):
+    pro_list = ["11111", "22222"]
+    expected_input = "11111\n22222"
+    session = MockSession({expected_input: [response(by_input(expected_input))]})
+    spec = make_spec("single_batch", batch_size=2)
+    spec.site.typing_delay_ms = 75
+    spec.site.inter_pro_delay_s = 0.5
+
+    result = asyncio.run(BatchScraper(MockProvider(session), spec, str(tmp_path)).run_batch(
+        make_jobs(pro_list), spec))
+
+    assert result.missing == []
+    assert len(session.typed_chunks) >= 3  # initial clear, pro 1, separator, pro 2
+    assert session.input_value == expected_input
+    assert any(chunk[1] == 75 for chunk in session.typed_chunks)
+
+
+def test_single_batch_unmatched_is_not_found_records_not_found(tmp_path):
+    session = MockSession({"1\n2": [response(by_input("1"))]})
+    spec = make_spec("single_batch", batch_size=2)
+    spec.site.extra = {
+        "retry_missing_individually": False,
+        "single_batch_unmatched_is_not_found": True,
+    }
+    result = asyncio.run(BatchScraper(MockProvider(session), spec, str(tmp_path)).run_batch(
+        make_jobs(["1", "2"]), spec))
+    assert result.missing == []
+    assert "1" in result.received
+    assert "2" in result.received
+    assert result.outcomes["1"] in ("found", "captured")
+    assert result.outcomes["2"] == "not_found"
+
+
+def test_get_path_handles_unpacked_dict_with_index_zero():
+    from app.core.mapper import get_path
+    raw_dict = {"referenceNumbers": {"proNumber": "771043317403"}, "shipment": {"status": "In Transit"}}
+    raw_list = [{"referenceNumbers": {"proNumber": "771043317403"}, "shipment": {"status": "In Transit"}}]
+
+    assert get_path(raw_dict, "[0].referenceNumbers.proNumber") == "771043317403"
+    assert get_path(raw_dict, "referenceNumbers.proNumber") == "771043317403"
+    assert get_path(raw_list, "[0].referenceNumbers.proNumber") == "771043317403"
+    assert get_path(raw_dict, "[0].shipment.status") == "In Transit"
+
+

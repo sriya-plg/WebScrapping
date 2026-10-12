@@ -320,14 +320,6 @@ class BatchScraper:
             return expected_text
         gradual = site.typing_delay_ms > 0 or site.inter_pro_delay_s > 0
 
-        if site.input_mode == "multiline":
-            setter = getattr(session, "set_input_value", None)
-            if setter is not None:
-                await setter(selector, expected_text)
-            else:
-                await session.fill(selector, expected_text, human=False)
-            return expected_text
-
         if gradual:
             await session.type_text(selector, "", clear=True)
             for index, pro in enumerate(pros):
@@ -576,6 +568,8 @@ class BatchScraper:
             return pro_path[2:].lstrip(".")
         if pro_path.startswith("[0]"):
             return pro_path[3:].lstrip(".")
+        if "[]" in pro_path:
+            return pro_path.split("[]", 1)[1].lstrip(".")
         return pro_path
 
     def _assign_single_batch_response(
@@ -596,6 +590,10 @@ class BatchScraper:
                 values = _path_values(raw, array_path)
                 if values and isinstance(values[0], list):
                     raw = values[0]
+            elif "data" in raw and isinstance(raw["data"], list):
+                raw = raw["data"]
+            elif "referenceNumbers" in raw or "shipment" in raw:
+                raw = [raw]
         if not isinstance(raw, list):
             return False
         item_pro_path = self._single_batch_item_pro_path(site)
@@ -608,6 +606,13 @@ class BatchScraper:
                 matched.add(normalized)
                 self._record_pro_response(keys[normalized], item, spec, received, outcomes, summaries)
         if matched:
+            if (site.extra or {}).get("single_batch_unmatched_is_not_found"):
+                unmatched = set(keys) - matched
+                for normalized in unmatched:
+                    pro = keys[normalized]
+                    self._record_pro_response(pro, [], spec, received, outcomes, summaries)
+                    outcomes[pro] = "not_found"
+                    summaries[pro] = {"error_message": "shipment not found in carrier batch response", "data_count": 0}
             return True
         if not raw:
             for normalized in keys:

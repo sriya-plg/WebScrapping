@@ -50,16 +50,20 @@ site:
     pro_input_digits: 11
     # Batch-only search (same knobs as Estes; per-carrier in mapping.yaml, not global Python).
     retry_missing_individually: false
+    single_batch_unmatched_is_not_found: true
     return_to_tracking_after_submit: true
     batch_collect_all_responses: true
     single_batch_item_pro_path: referenceNumbers.proNumber
+    landing_settle_s: 2.5
 
   response_timeout_s: 45
   idle_window_s: 2
-  typing_delay_ms: 0
-  inter_pro_delay_s: 0
-  pre_submit_delay_s: 1.0
-  inter_batch_delay_s: 2.0
+  typing_delay_ms: 75
+  inter_pro_delay_s: 1.0
+  pre_submit_delay_s: 2.5
+  inter_batch_delay_s: 4.0
+  action_min_delay_s: 1.0
+  action_max_delay_s: 2.5
 
   login:
     enabled: false
@@ -73,16 +77,19 @@ site:
       success: "TODO_REPLACE_LOGGED_IN_SELECTOR"
 
 mapping:
+  auto: true
   fields:
-    reference: "[0].referenceNumbers.proNumber"
-    status: "[0].shipment.status"
-    pickup_date: "[0].shipment.pickupDate"
-    delivery_date: "[0].delivery.deliveredDate"
-    eta: "[0].delivery.expectedDate"
-    origin: "[0].shipper.companyName"
-    destination: "[0].consignee.companyName"
+    reference: "referenceNumbers.proNumber|[0].referenceNumbers.proNumber"
+    status: "shipment.status|[0].shipment.status"
+    pickup_date: "shipment.pickupDate|[0].shipment.pickupDate"
+    delivery_date: "delivery.deliveredDate|[0].delivery.deliveredDate"
+    eta: "delivery.expectedDate|[0].delivery.expectedDate"
+    origin: "shipper.companyName|[0].shipper.companyName|shipper.address.city"
+    destination: "consignee.companyName|[0].consignee.companyName|consignee.address.city"
   status_map:
     Delivered: DELIVERED
+    "Delivery Completed - OK": DELIVERED
+    "Delivery Completed": DELIVERED
     In Transit: IN_TRANSIT
     Out for Delivery: OUT_FOR_DELIVERY
     Picked Up: PICKED_UP
