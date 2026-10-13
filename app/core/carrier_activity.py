@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -60,7 +61,18 @@ def pegasus_datetime(value: datetime | str | None, *, fallback: datetime | None 
     elif isinstance(value, datetime):
         dt = value
     else:
-        text = str(value).strip().replace("Z", "+00:00")
+        text = str(value).strip()
+        # If text is a time with numeric timezone offset (e.g. '15:18:00-05:00'), strip the offset
+        m_time = re.match(r"^(\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*[+-]\d{2}:?\d{2}$", text)
+        if m_time:
+            text = m_time.group(1)
+        # If text is a time-only string (HH:MM:SS or HH:MM), combine with fallback date
+        if re.match(r"^\d{1,2}:\d{2}(?::\d{2})?$", text):
+            if len(text) == 5:
+                text = f"{text}:00"
+            fb_date = (fallback or datetime.now(timezone.utc)).date()
+            text = f"{fb_date.isoformat()}T{text}"
+        text = text.replace("Z", "+00:00")
         try:
             dt = datetime.fromisoformat(text)
         except ValueError:

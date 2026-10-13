@@ -44,7 +44,7 @@ def test_saia_spec_prefers_full_details_api():
     assert SAIA is not None
     assert "find-full-detail" in (SAIA.site.response_url_pattern or "")
     assert "find-by-pro-number" in (SAIA.site.response_url_pattern or "")
-    assert SAIA.site.response_url_prefer == "find-full-detail"
+    assert SAIA.site.response_url_prefer is None
     assert "service_level" in SAIA.mapping.fields
     assert SAIA.mapping.events and "history" in SAIA.mapping.events["path"]
     assert "podName" in SAIA.activity.payload_map
@@ -248,14 +248,14 @@ def test_estes_movement_history_maps_to_add_carrier_activity():
     assert result.pod_name == "Seth"
     assert result.pod_datetime.startswith("2026-10-07T13:01:59")
     assert [e.description for e in result.events] == [
-        "Pickup Location Serviced",
-        "En route to Estes facility at Kansas City, KS (164)",
-        "Departed Estes facility at Kansas City, KS (164)",
-        "Out for Delivery",
-        "Delivery Completed - OK",
+        "Actual Pickup",
+        "Planned Waypoint",
+        "Planned Waypoint",
+        "Actual Delivery",
+        "Actual Delivery",
     ]
     assert result.events[0].code == "Actual Pickup"
-    assert result.events[0].timezone == "-05:00"
+    assert result.events[0].timezone is None
     assert result.events[0].lat == pytest.approx(32.837842)
     assert result.events[0].long == pytest.approx(-97.3410885)
     assert result.events[1].code == "Planned Waypoint"
@@ -275,18 +275,20 @@ def test_estes_movement_history_maps_to_add_carrier_activity():
     assert payload["carrierCode"] == "ESTE03"
     assert payload["reference"] == "1848718241"
     assert payload["podName"] == "Seth"
-    assert payload["podDateTime"] == "2026-10-07T18:01:59Z"
+    # Local delivery time 13:01:59 from "13:01:59-05:00" is sent directly as 13:01:59 without UTC conversion
+    assert payload["podDateTime"] == "2026-10-07T13:01:59Z"
     assert [ev["code"] for ev in payload["events"]] == [
         "Actual Pickup", "Planned Waypoint", "Planned Waypoint", "Delivery", "Delivery",
     ]
     assert all(len(ev["code"]) <= 50 for ev in payload["events"])
-    assert payload["events"][1]["description"] == "En route to Estes facility at Kansas City, KS (164)"
-    assert payload["events"][1]["eventDateTime"] == "2026-10-06T07:44:48Z"
-    assert payload["events"][1]["timezone"] == "-05:00"
-    assert payload["events"][2]["description"] == "Departed Estes facility at Kansas City, KS (164)"
-    assert payload["events"][2]["eventDateTime"] == "2026-10-07T02:37:45Z"
-    assert payload["events"][-1]["description"] == "Delivery Completed - OK"
-    assert payload["events"][-1]["eventDateTime"] == "2026-10-07T18:01:59Z"
+    assert payload["events"][1]["description"] == "Planned Waypoint"
+    # Local scan times preserved without timezone offset conversion
+    assert payload["events"][1]["eventDateTime"] == "2026-10-06T02:44:48Z"
+    assert "timezone" not in payload["events"][1]
+    assert payload["events"][2]["description"] == "Planned Waypoint"
+    assert payload["events"][2]["eventDateTime"] == "2026-10-06T21:37:45Z"
+    assert payload["events"][-1]["description"] == "Actual Delivery"
+    assert payload["events"][-1]["eventDateTime"] == "2026-10-07T13:01:59Z"
 
 
 def _forwardair_job(housebill="23600001", pro="96765557") -> TrackingJob:
@@ -383,3 +385,32 @@ def test_forwardair_maps_without_system_timezone_database(monkeypatch):
     assert mapper.apply_zone_abbrev("2026-03-08T02:00:00", "ET") == "2026-03-08T02:00:00-04:00"
     assert mapper.apply_zone_abbrev("2026-11-01T01:59:00", "PT") == "2026-11-01T01:59:00-07:00"
     assert mapper.apply_zone_abbrev("2026-11-01T02:00:00", "PT") == "2026-11-01T02:00:00-08:00"
+
+
+def test_time_offset_stripped_without_conversion():
+    """Times like '15:18:00-05:00' must not be converted to UTC, but sent directly as 15:18:00."""
+    from app.core.mapper import strip_time_offset, get_path, compose_value
+
+    # Unit tests for strip_time_offset helper
+    assert strip_time_offset("15:18:00-05:00") == "15:18:00"
+    assert strip_time_offset("13:01:59-05:00") == "13:01:59"
+    assert strip_time_offset("15:18:00+05:00") == "15:18:00"
+    assert strip_time_offset("15:18:00-0500") == "15:18:00"
+    assert strip_time_offset("15:18:00.123-05:00") == "15:18:00.123"
+    assert strip_time_offset("15:18-05:00") == "15:18"
+    assert strip_time_offset("15:18:00") == "15:18:00"
+    assert strip_time_offset(None) is None
+
+    # Extraction via get_path
+    obj = {"deliveryTime": "15:18:00-05:00", "deliveryDate": "2026-10-07"}
+    assert get_path(obj, "deliveryTime") == "15:18:00"
+
+    # Composition via compose_value
+    assert compose_value(obj, "{deliveryDate}T{deliveryTime}") == "2026-10-07T15:18:00"
+
+    # pegasus_datetime preserves 15:18:00 without UTC conversion
+    from app.core.carrier_activity import pegasus_datetime
+    assert pegasus_datetime("15:18:00-05:00", fallback=datetime(2026, 10, 7, tzinfo=timezone.utc)) == "2026-10-07T15:18:00Z"
+    assert pegasus_datetime("15:18:00", fallback=datetime(2026, 10, 7, tzinfo=timezone.utc)) == "2026-10-07T15:18:00Z"
+    assert pegasus_datetime("2026-10-07T15:18:00") == "2026-10-07T15:18:00Z"
+

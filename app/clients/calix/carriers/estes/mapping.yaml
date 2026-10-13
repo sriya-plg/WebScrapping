@@ -81,7 +81,7 @@ mapping:
     pod_name: data.0.receivedBy|data.0.driverInfo.name|data.0.podName|data.0.signedBy|data.0.delivery.signedBy
     pod_datetime: data.0.deliveryDate|data.0.podDateTime|shipment.deliveryDate
   compose:
-    # deliveryDate + deliveryTime (offset kept, later converted to UTC Z).
+    # deliveryDate + deliveryTime (local clock time preserved without offset).
     pod_datetime: "{data.0.deliveryDate}T{data.0.deliveryTime}"
   events:
     # One event per statusHistory scan. Parent movement supplies code, location, and coordinates.

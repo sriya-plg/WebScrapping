@@ -15,6 +15,25 @@ from app.models import CarrierAccount, TrackingEvent, TrackingResult
 from app.settings import CarrierSpec
 
 
+_TIME_WITH_OFFSET_RX = re.compile(
+    r"^(\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*[+-]\d{2}:?\d{2}$"
+)
+
+
+def strip_time_offset(value: Any) -> Any:
+    """Strip numeric timezone offset from time strings (e.g. '15:18:00-05:00' -> '15:18:00').
+
+    Prevents unintended timezone conversions when carrier responses provide local clock times with offsets.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    m_time = _TIME_WITH_OFFSET_RX.match(text)
+    if m_time:
+        return m_time.group(1)
+    return value
+
+
 def get_path(obj: Any, path: str, default: Any = None) -> Any:
     """Dotted path with list indexes; 'a.b|c.d' = first non-empty alternative."""
     for alt in path.split("|"):
@@ -36,7 +55,7 @@ def get_path(obj: Any, path: str, default: Any = None) -> Any:
                 ok = False
                 break
         if ok and cur not in (None, "", []):
-            return cur
+            return strip_time_offset(cur) if isinstance(cur, str) else cur
     return default
 
 
@@ -65,6 +84,7 @@ def compose_value(obj: Any, template: str) -> Any:
     text = re.sub(r"\s+,", ",", text)
     text = re.sub(r",\s*$", "", text)
     text = re.sub(r"\s+", " ", text).strip(" ,")
+    text = strip_time_offset(text)
     return text or None
 
 
@@ -77,6 +97,7 @@ def parse_loose_datetime(value: Any) -> str | None:
     text = re.sub(r"\s+", " ", str(value).strip())
     if not text:
         return None
+    text = strip_time_offset(text)
     text = text.rstrip("T").strip()
     text = text.replace("Z", "")
     text = re.sub(r"\b([ap])\.?m\.?\b", lambda m: m.group(1).upper() + "M", text, flags=re.I)
@@ -420,11 +441,8 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
                     data[field] = composed
             _assign_event_fields(data, prepared, raw, assign)
             raw_ts = data.get("timestamp")
-            if raw_ts and not data.get("timezone"):
-                offset = re.search(r"([+-]\d{2}:\d{2})\s*$", str(raw_ts))
-                if offset:
-                    data["timezone"] = offset.group(1)
             if raw_ts:
+                raw_ts = strip_time_offset(raw_ts)
                 parsed_ts = parse_loose_datetime(raw_ts) or raw_ts
                 data["timestamp"] = apply_zone_abbrev(parsed_ts, data.get("timezone"))
             events.append(TrackingEvent(**data))
