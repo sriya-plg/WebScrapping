@@ -51,7 +51,7 @@ site:
     # Per-carrier batch flow (see saia/estes mapping.yaml; BatchScraper reads site.extra only).
     landing_settle_s: 3
     pro_input_digits: 10
-    retry_missing_individually: false
+    retry_missing_individually: true
     batch_collect_all_responses: true
     return_to_tracking_after_submit: true
     response_match_loose_json: true
