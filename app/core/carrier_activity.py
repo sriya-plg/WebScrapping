@@ -8,14 +8,14 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
+
 from app.core.mapper import apply_map, get_path, normalize
 from app.core.scrape_log import log_scrape_and_tms
 from app.core.scraper import ScrapeBatchResult
 from app.logging_setup import log
 from app.models import CarrierAccount, CarrierConfig, TrackingJob, TrackingResult
 from app.settings import ActivityConfig, CarrierSpec
-
-import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,7 @@ def _activity_events(
     events_map: dict[str, str],
     *,
     fallback: datetime,
+    preserve_offsets: bool = False,
 ) -> list[dict[str, Any]]:
     if not result:
         return []
@@ -122,10 +123,11 @@ def _activity_events(
         # plgtst returns HTTP 500 when event code is longer than 50 characters.
         item["code"] = str(code)[:50]
         item["description"] = item.get("description") or ""
-        item["eventDateTime"] = pegasus_datetime(
-            item.get("eventDateTime") or event.timestamp or result.scraped_at,
-            fallback=fallback,
-        )
+        event_time = item.get("eventDateTime") or event.timestamp or result.scraped_at
+        if preserve_offsets and isinstance(event_time, str):
+            item["eventDateTime"] = event_time
+        else:
+            item["eventDateTime"] = pegasus_datetime(event_time, fallback=fallback)
         if item.get("timezone"):
             item["timezone"] = str(item["timezone"]).strip()
         else:
@@ -233,7 +235,10 @@ def build_add_carrier_activity(
         payload["mlLog"] = str(payload["mlLog"] or "")[:2000]
     if "mlError" in payload:
         payload["mlError"] = str(payload["mlError"] or "")[:2000]
-    payload["events"] = _activity_events(result, activity.events_map, fallback=ml_end)
+    payload["events"] = _activity_events(
+        result, activity.events_map, fallback=ml_end,
+        preserve_offsets=activity.preserve_event_offsets,
+    )
     return payload
 
 

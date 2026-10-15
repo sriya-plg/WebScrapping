@@ -6,6 +6,12 @@
 
 aliases: [EXLA, ESTE03]
 
+activity:
+  preserve_event_offsets: true
+  events_map:
+    state: state
+    city: city
+
 browser:
   browser_mode: playwright_stealth
   headless: false
@@ -84,20 +90,34 @@ mapping:
     # deliveryDate + deliveryTime (local clock time preserved without offset).
     pod_datetime: "{data.0.deliveryDate}T{data.0.deliveryTime}"
   events:
-    # One event per statusHistory scan. Parent movement supplies code, location, and coordinates.
+    # One event per statusHistory scan, followed by the movement event at its latest scan time.
     path: data.0.movementHistory|history
     explode: statusHistory
+    append_parent_event: true
+    preserve_offset: true
     fields:
       timestamp: date|referenceDate
-      description: movementHistory.description|description
-      location: location.name|location
       status: conciseStatus|expandedStatus|status
-      code: transportEventTypeCode|conciseStatus|code|status
+      code: conciseStatus|expandedStatus|code|status
+      description: expandedStatus|statusDescription|description
+      city: location.address.city
+      state: location.address.state
       timezone: timezone|tz
-      # Estes geoCoordinates is [longitude, latitude].
+      lat: location.geoCoordinates.1|latitude|lat
+      long: location.geoCoordinates.0|longitude|lng|long
+    movement_fields:
+      timestamp: date|referenceDate
+      status: conciseStatus|expandedStatus|status
+      code: transportEventTypeCode|id|code|status
+      description: description|transportEventTypeCode
+      city: location.address.city
+      state: location.address.state
+      timezone: timezone|tz
       lat: location.geoCoordinates.1|latitude|lat
       long: location.geoCoordinates.0|longitude|lng|long
     compose:
+      timestamp: "{referenceDate}T{referenceTime}"
+    movement_fields_compose:
       timestamp: "{referenceDate}T{referenceTime}"
     assign:
       - if: id=Pickup
