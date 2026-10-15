@@ -34,7 +34,7 @@ def strip_time_offset(value: Any) -> Any:
     return value
 
 
-def get_path(obj: Any, path: str, default: Any = None) -> Any:
+def get_path(obj: Any, path: str, default: Any = None, *, strip_offset: bool = True) -> Any:
     """Dotted path with list indexes; 'a.b|c.d' = first non-empty alternative."""
     for alt in path.split("|"):
         cur, ok = obj, True
@@ -55,14 +55,14 @@ def get_path(obj: Any, path: str, default: Any = None) -> Any:
                 ok = False
                 break
         if ok and cur not in (None, "", []):
-            return strip_time_offset(cur) if isinstance(cur, str) else cur
+            return strip_time_offset(cur) if strip_offset and isinstance(cur, str) else cur
     return default
 
 
 _COMPOSE_RX = re.compile(r"\{([^}]+)\}")
 
 
-def compose_value(obj: Any, template: str) -> Any:
+def compose_value(obj: Any, template: str, *, preserve_offset: bool = False) -> Any:
     """Fill `{dotted.path}` placeholders from obj. Used by mapping.yaml `compose:`."""
     if not template:
         return None
@@ -72,7 +72,7 @@ def compose_value(obj: Any, template: str) -> Any:
 
     def repl(match: re.Match) -> str:
         nonlocal filled
-        value = get_path(obj, match.group(1).strip())
+        value = get_path(obj, match.group(1).strip(), strip_offset=not preserve_offset)
         if value in (None, ""):
             return ""
         filled = True
@@ -84,7 +84,8 @@ def compose_value(obj: Any, template: str) -> Any:
     text = re.sub(r"\s+,", ",", text)
     text = re.sub(r",\s*$", "", text)
     text = re.sub(r"\s+", " ", text).strip(" ,")
-    text = strip_time_offset(text)
+    if not preserve_offset:
+        text = strip_time_offset(text)
     return text or None
 
 
@@ -343,20 +344,20 @@ def _time_sort_key(value: Any) -> tuple:
     return (0, text)
 
 
-def _row_max(rows: list, template: str) -> dict | None:
+def _row_max(rows: list, template: str, *, preserve_offset: bool = False) -> dict | None:
     """Pick the row whose composed template is latest. Ties keep the last row."""
     best, best_key = None, None
     for row in rows:
         if not isinstance(row, dict):
             continue
-        text = compose_value(row, template) if template and "{" in template else get_path(row, template)
+        text = compose_value(row, template, preserve_offset=preserve_offset) if template and "{" in template else get_path(row, template, strip_offset=not preserve_offset)
         key = _time_sort_key(text)
         if best is None or key >= best_key:
             best, best_key = row, key
     return best
 
 
-def _explode_events(items: list, explode: str | None) -> list[dict]:
+def _explode_events(items: list, explode: str | None, append_parent: bool = False) -> list[dict]:
     """One output row per child list (Estes statusHistory). Parent fields fill gaps on each child."""
     if not explode:
         return [it for it in items if isinstance(it, dict)]
@@ -366,13 +367,21 @@ def _explode_events(items: list, explode: str | None) -> list[dict]:
         if not isinstance(it, dict):
             continue
         children = get_path(it, explode, None)
-        if not isinstance(children, list) or not children:
+        if children is None:
             out.append(it)
             continue
+        if not isinstance(children, list) or not children:
+            if not append_parent:
+                out.append(it)
+            continue
         parent = {k: v for k, v in it.items() if k != drop}
-        for child in children:
-            if isinstance(child, dict):
-                out.append({**parent, **child})
+        child_rows = [child for child in children if isinstance(child, dict)]
+        for child in child_rows:
+            out.append({**parent, **child, "_movement_event": False})
+        if append_parent and child_rows:
+            latest = _row_max(child_rows, "{referenceDate}T{referenceTime}", preserve_offset=True)
+            if latest:
+                out.append({**parent, **latest, "_movement_event": True})
     return out
 
 
@@ -431,21 +440,48 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
         compose_ev = m.events.get("compose") or {}
         select = m.events.get("select") or {}
         assign = m.events.get("assign") or []
-        rows = _explode_events(get_path(raw, m.events["path"], []) or [], m.events.get("explode"))
+        preserve_offset = bool(m.events.get("preserve_offset"))
+        rows = _explode_events(
+            get_path(raw, m.events["path"], []) or [], m.events.get("explode"),
+            append_parent=bool(m.events.get("append_parent_event")),
+        )
         for it in rows:
             prepared = _prepare_event_item(it, select)
-            data = {f: get_path(prepared, p) for f, p in flds.items() if f and p}
-            for field, template in compose_ev.items():
-                composed = compose_value(prepared, template)
+            is_movement_event = bool(it.get("_movement_event"))
+            event_fields = m.events.get("movement_fields", {}) if is_movement_event else flds
+            data = {f: get_path(prepared, p, strip_offset=not preserve_offset) for f, p in event_fields.items() if f and p}
+            event_compose = m.events.get("movement_fields_compose", {}) if is_movement_event else compose_ev
+            for field, template in event_compose.items():
+                composed = compose_value(prepared, template, preserve_offset=preserve_offset)
                 if composed not in (None, ""):
                     data[field] = composed
             _assign_event_fields(data, prepared, raw, assign)
             raw_ts = data.get("timestamp")
-            if raw_ts:
+            if raw_ts and not preserve_offset:
                 raw_ts = strip_time_offset(raw_ts)
                 parsed_ts = parse_loose_datetime(raw_ts) or raw_ts
                 data["timestamp"] = apply_zone_abbrev(parsed_ts, data.get("timezone"))
+            elif raw_ts:
+                parsed_ts = parse_loose_datetime(raw_ts) or raw_ts
+                data["timestamp"] = parsed_ts
+                try:
+                    offset = datetime.fromisoformat(parsed_ts).utcoffset()
+                    if data.get("timezone") in (None, "") and offset is not None:
+                        total_minutes = int(offset.total_seconds() // 60)
+                        sign = "+" if total_minutes >= 0 else "-"
+                        total_minutes = abs(total_minutes)
+                        data["timezone"] = f"{sign}{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+                except ValueError:
+                    pass
             events.append(TrackingEvent(**data))
+        if m.events.get("append_parent_event"):
+            unique: dict[tuple, TrackingEvent] = {}
+            for event in events:
+                identity = tuple(getattr(event, key, None) for key in (
+                    "code", "state", "city", "description", "timestamp", "timezone", "lat", "long",
+                ))
+                unique[identity] = event
+            events = list(unique.values())
         delivery_zone = _delivery_zone_label(events)
         if delivery_zone:
             zoned = apply_zone_abbrev(vals.get("pod_datetime"), delivery_zone)

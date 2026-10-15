@@ -60,9 +60,12 @@ site:
       - "#onetrust-accept-btn-handler"
 
 activity:
+  payload_map:
+    pieces: pieces
   events_map:
     # TimeZoneCode converts RecordDate / PodDate to UTC. Do not post it.
     timezone: ""
+    airportCode: location
 
 mapping:
   auto: true
@@ -85,6 +88,7 @@ mapping:
       status: StatusDescription
       timestamp: RecordDate
       location: AirportCode
+      airportCode: AirportCode
       description: StatusDescription
       code: statusCode|StatusCode|StatusDescription
       timezone: TimeZoneCode|Timezone|tz
