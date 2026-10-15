@@ -16,8 +16,32 @@ defaults:
       not_found: 4
       no_response: 3
       map_failed: 3
-  # Batch scrape posts one AddCarrierActivity body per housebill (config/app.yaml carrier_activity_path).
-  payload_map:                   # legacy bulk map; AddCarrierActivity uses app/core/carrier_activity.py
+    # TrackingResult + ctx -> AddCarrierActivity. Paths are dotted (`a.b`) or `=literal`.
+    # Override a key here for all Calix carriers, or in a carrier mapping.yaml under activity:.
+    payload_map:
+      housebill: ctx.housebill
+      proNumber: ctx.pro_number
+      carrierCode: ctx.carrier_code
+      serviceLevel: service_level
+      billTo: ctx.bill_to
+      mlStatus: ctx.ml_status
+      mlLog: ctx.ml_log
+      mlStartDateTime: ctx.ml_start
+      mlEndDateTime: ctx.ml_end
+      mlProcessTime: ctx.ml_process_time
+      mlError: ctx.ml_error
+      reference: reference
+      podName: pod_name
+      podDateTime: pod_datetime
+    events_map:
+      code: code|status
+      description: description
+      eventDateTime: timestamp
+      timezone: timezone
+      lat: lat
+      long: long
+  # Legacy bulk post (AccountJob path). Batch scrape uses activity.payload_map above.
+  payload_map:
     billTo: ctx.bill_to
     carrierCode: ctx.carrier_code
     housebill: ctx.housebill

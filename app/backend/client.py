@@ -57,7 +57,7 @@ class BackendClient(ABC):
     async def post_tracking(self, account: CarrierAccount, spec: CarrierSpec, run_id: str,
                             items: list[dict]) -> None: ...
 
-    async def add_carrier_activity(self, payload: dict[str, Any]) -> None:
+    async def add_carrier_activity(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         raise NotImplementedError(f"{type(self).__name__} does not implement add_carrier_activity")
 
 
@@ -85,11 +85,13 @@ class FileBackend(BackendClient):
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{account.bill_to}_{spec.code}.json").write_text(json.dumps(items, indent=2))
 
-    async def add_carrier_activity(self, payload: dict[str, Any]) -> None:
+    async def add_carrier_activity(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         d = self.out / "AddCarrierActivity"
         d.mkdir(parents=True, exist_ok=True)
         housebill = str(payload.get("housebill") or "unknown")
-        (d / f"{housebill}.json").write_text(json.dumps(payload, indent=2))
+        path = d / f"{housebill}.json"
+        path.write_text(json.dumps(payload, indent=2))
+        return {"ok": True, "status_code": None, "body": {"saved": str(path), "mode": "file"}}
 
 
 class HttpBackend(BackendClient):
@@ -189,6 +191,10 @@ class HttpBackend(BackendClient):
         refs = []
         skipped = 0
         for row in rows:
+            row_code = (row.carrier_code or "").strip().casefold()
+            if row_code and row_code != str(spec.code).strip().casefold():
+                skipped += 1
+                continue
             search_by = account.search_by or "proNumber"
             value = str(getattr(row, search_by, None) or getattr(row, {
                 "proNumber": "pro_number", "housebill": "housebill", "vendorId": "vendor_id"
@@ -214,16 +220,25 @@ class HttpBackend(BackendClient):
                                                          "carrierCode": spec.code, "items": items})
         r.raise_for_status()
 
-    async def add_carrier_activity(self, payload: dict[str, Any]) -> None:
+    async def add_carrier_activity(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         r = await self.http_activity.post(self.s.carrier_activity_path, json=payload)
+        try:
+            body: Any = r.json()
+        except ValueError:
+            body = (r.text or "")[:2000]
+        result = {
+            "ok": not r.is_error,
+            "status_code": r.status_code,
+            "body": body,
+        }
         if r.is_error:
             import logging
-            body = (r.text or "")[:500]
             logging.getLogger(__name__).warning(
-                "AddCarrierActivity HTTP %s body=%s housebill=%s",
-                r.status_code, body, payload.get("housebill"),
+                "AddCarrierActivity HTTP %s body=%s housebill=%s billTo=%s",
+                r.status_code, str(body)[:500], payload.get("housebill"), payload.get("billTo"),
             )
-        r.raise_for_status()
+            r.raise_for_status()
+        return result
 
 
 def make_backend(s: BackendSettings) -> BackendClient:

@@ -17,7 +17,17 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
-COMMON_FIELDS = {"reference", "status", "pickup_date", "delivery_date", "eta", "origin", "destination", "pieces", "weight"}
+# Well-known canonical fields (mapping.yaml `fields:`). Extra names are allowed and
+# stored on TrackingResult so a new backend key can be mapped from YAML alone.
+COMMON_FIELDS = {
+    "reference", "status", "pickup_date", "delivery_date", "eta",
+    "origin", "destination", "pieces", "weight",
+    "service_level", "pod_name", "pod_datetime",
+}
+EVENT_FIELDS = {
+    "timestamp", "description", "location", "status",
+    "code", "timezone", "lat", "long",
+}
 
 
 class _Strict(BaseModel):
@@ -58,6 +68,10 @@ class SiteConfig(_Strict):
     submit_selector: str | None = None   # button to click; BatchScraper never relies on Enter
     response_regex: str | None = None    # default: any same-site JSON response containing the reference
     response_url_pattern: str | None = None
+    # Regex/substring of the richer tracking API. When both the summary and details
+    # endpoints fire (e.g. Saia find-by-pro vs find-full-details), the preferred URL
+    # wins per PRO. If it never arrives, the other matching responses are still used.
+    response_url_prefer: str | None = None
     expected_response_shape: Literal["single_batch", "per_pro"] = "per_pro"
     response_pro_path: str = "proNumber"
     input_mode: Literal["multiline", "delimited"] = "multiline"
@@ -99,8 +113,42 @@ class SiteConfig(_Strict):
         return value
 
 
+def _default_activity_payload_map() -> dict[str, str]:
+    return {
+        "housebill": "ctx.housebill",
+        "proNumber": "ctx.pro_number",
+        "carrierCode": "ctx.carrier_code",
+        "serviceLevel": "service_level",
+        "billTo": "ctx.bill_to",
+        "mlStatus": "ctx.ml_status",
+        "mlLog": "ctx.ml_log",
+        "mlStartDateTime": "ctx.ml_start",
+        "mlEndDateTime": "ctx.ml_end",
+        "mlProcessTime": "ctx.ml_process_time",
+        "mlError": "ctx.ml_error",
+        "reference": "reference",
+        "podName": "pod_name",
+        "podDateTime": "pod_datetime",
+    }
+
+
+def _default_activity_events_map() -> dict[str, str]:
+    return {
+        "code": "code|status",
+        "description": "description",
+        "eventDateTime": "timestamp",
+        "timezone": "timezone",
+        "lat": "lat",
+        "long": "long",
+    }
+
+
 class ActivityConfig(_Strict):
-    """AddCarrierActivity: mlStatus must be a valid Pegasus ML status id (plgtst accepts 2-4; 0/1 rejected)."""
+    """AddCarrierActivity: mlStatus must be a valid Pegasus ML status id (plgtst accepts 2-4; 0/1 rejected).
+
+    payload_map / events_map are the client-level YAML that turns TrackingResult + ctx
+    into the backend body. Override in client.yaml (all carriers) or a carrier mapping.yaml.
+    """
     ml_status_default: int = 2
     ml_status_by_outcome: dict[str, int] = Field(default_factory=lambda: {
         "ok": 2,
@@ -108,21 +156,42 @@ class ActivityConfig(_Strict):
         "no_response": 3,
         "map_failed": 3,
     })
+    payload_map: dict[str, str] = Field(default_factory=_default_activity_payload_map)
+    events_map: dict[str, str] = Field(default_factory=_default_activity_events_map)
 
 
 class MappingConfig(_Strict):
-    """raw carrier JSON -> common schema. Explicit `fields` win; `auto` fills the gaps."""
+    """raw carrier JSON -> common schema. Explicit `fields` win; `auto` fills the gaps.
+
+    Field names should match TrackingResult (or a new extra key you also list in
+    activity.payload_map). Dotted paths use `|` for first-non-empty fallbacks so a
+    carrier JSON change is a YAML edit, not a code change.
+    """
     auto: bool = True
-    fields: dict[str, str] = {}          # common field -> dotted path ("a.b|c.d" = first non-empty)
+    fields: dict[str, str] = {}          # canonical field -> dotted path ("a.b|c.d" = first non-empty)
+    compose: dict[str, str] = {}         # field -> "{path} {path}" template (date+time, city+state)
     status_map: dict[str, str] = {}      # carrier status text (any case) -> common status
-    events: dict[str, Any] | None = None  # {path: "history", fields: {timestamp: "date", ...}}
+    events: dict[str, Any] | None = None  # {path, fields, compose}
 
     @field_validator("fields")
     @classmethod
-    def _known(cls, v):
-        bad = set(v) - COMMON_FIELDS
-        if bad:
-            raise ValueError(f"unknown common field(s) {sorted(bad)}; allowed: {sorted(COMMON_FIELDS)}")
+    def _fields(cls, v):
+        if not isinstance(v, dict):
+            raise ValueError("fields must be a mapping of name -> dotted path")
+        return v
+
+    @field_validator("events")
+    @classmethod
+    def _events(cls, v):
+        if v is None:
+            return v
+        flds = v.get("fields") or {}
+        unknown = set(flds) - EVENT_FIELDS
+        if unknown:
+            # Extra event keys are kept on TrackingEvent (extra=allow).
+            logger.debug("mapping.yaml events.fields extra keys: %s", sorted(unknown))
+        if "path" in v and not v["path"]:
+            raise ValueError("events.path must be a dotted JSON path")
         return v
 
 
@@ -176,6 +245,7 @@ class AlertSettings(_Strict):
 class AppSettings(_Strict):
     log_level: str = "INFO"
     log_format: Literal["console", "json"] = "console"
+    logs_dir: str = "logs"
     state_db: str = "state/tracker.db"
     state_dir: str = "state/browser"
     samples_dir: str = "state/samples"   # raw JSON saved when mapping fails / status unknown (to write mapping.yaml)
@@ -193,7 +263,7 @@ def load_settings(path: str | Path = "config/app.yaml") -> AppSettings:
 
 
 # ------------------------------------------------------------------------------------------ loader
-_MAPPING_KEYS = {"auto", "fields", "status_map", "events"}
+_MAPPING_KEYS = {"auto", "fields", "compose", "status_map", "events"}
 
 
 def _merge(a: dict, b: dict) -> dict:

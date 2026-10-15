@@ -1,10 +1,11 @@
 log_level: INFO
 log_format: console   # console = readable lines; json = one JSON object per line
+logs_dir: logs
 state_db: state/tracker.db
 state_dir: state/browser
 debug_dir: state/debug
 clients_dir: app/clients
-schedule: {interval_hours: 6, jitter_minutes: 25, seed: tracker}
+schedule: {interval_hours: 3, jitter_minutes: 25, seed: tracker}
 alerts: {webhook_url: null, dedupe_hours: 6}   # Teams/Slack incoming webhook
 backend:
   mode: http

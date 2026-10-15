@@ -98,6 +98,16 @@ class Scraper(Protocol):
     async def run(self, job: TrackingJob) -> ScrapeBatchResult: ...
 
 
+def _path_values_any(obj: Any, path: str) -> list[Any]:
+    """Like _path_values but `a|b` tries each alternative."""
+    found: list[Any] = []
+    for alt in str(path or "").split("|"):
+        alt = alt.strip()
+        if alt:
+            found.extend(_path_values(obj, alt))
+    return found
+
+
 def _path_values(obj: Any, path: str) -> list[Any]:
     """Resolve dotted JSON paths with numeric indexes and []/[*] list expansion."""
     path = path.removeprefix("$").lstrip(".")
@@ -503,18 +513,30 @@ class BatchScraper:
             await self._delay(site.action_min_delay_s, site.action_max_delay_s)
         await self._handle_recaptcha(session, spec)
 
+        prefer_rx = re.compile(site.response_url_prefer) if site.response_url_prefer else None
+
         def matching(responses: list[CapturedResponse]) -> list[CapturedResponse]:
             return [response for response in responses if pattern.search(response.url)]
+
+        def is_preferred(response: CapturedResponse) -> bool:
+            return bool(prefer_rx and prefer_rx.search(response.url))
 
         batch_collect = bool((site.extra or {}).get("batch_collect_all_responses"))
 
         def complete(responses: list[CapturedResponse]) -> bool:
+            matches = matching(responses)
             if site.expected_response_shape == "single_batch":
-                return bool(matching(responses))
+                if not matches:
+                    return False
+                # Keep listening until the preferred (full-details) API arrives; capture_all
+                # still falls back to quiet/timeout so find-by-pro is used if details never fire.
+                if prefer_rx and not any(is_preferred(response) for response in matches):
+                    return False
+                return True
             if batch_collect:
                 return False
             found = set()
-            for response in matching(responses):
+            for response in matches:
                 found.update(self._pro_keys_from_response(response, spec, keys, site))
             return set(keys).issubset(found)
 
@@ -531,6 +553,10 @@ class BatchScraper:
             timeout_s=site.response_timeout_s, settle_s=site.idle_window_s,
             until=complete)
         matches = matching(responses)
+        if prefer_rx:
+            # Summary APIs first, preferred/full-details last so they overwrite per PRO
+            # without the details response marking the rest of the chunk as not_found.
+            matches = sorted(matches, key=lambda response: 1 if is_preferred(response) else 0)
         if not matches and responses and (site.extra or {}).get("response_match_loose_json"):
             for response in responses:
                 if self._pro_keys_from_response(response, spec, keys, site):
@@ -557,7 +583,8 @@ class BatchScraper:
         for response in matches:
             if site.expected_response_shape == "single_batch":
                 if self._assign_single_batch_response(
-                    response, spec, keys, site, received, outcomes, summaries):
+                    response, spec, keys, site, received, outcomes, summaries,
+                    allow_unmatched_not_found=not is_preferred(response)):
                     continue
             found = self._pro_keys_from_response(response, spec, keys, site)
             if site.expected_response_shape == "single_batch" and not found:
@@ -565,6 +592,62 @@ class BatchScraper:
             for normalized in found:
                 self._record_pro_response(keys[normalized], response.json, spec,
                                           received, outcomes, summaries)
+        await self._collect_full_details(session, spec, keys, received, outcomes, summaries)
+
+    async def _collect_full_details(self, session: BrowserSession, spec: CarrierSpec,
+                                    keys: dict[str, str], received: dict[str, Any],
+                                    outcomes: dict[str, CaptureOutcome],
+                                    summaries: dict[str, dict[str, Any]]) -> None:
+        """Open each found PRO's detail view and capture its full-details API response.
+
+        Enabled by site.extra.detail_response_pattern. The row to click comes from
+        site.extra.detail_click_selector ({pro} = digits as entered; {pro_rx} = regex that
+        tolerates separators between digits). The detail view is closed with
+        site.extra.detail_back_selector, or browser history back."""
+        site = spec.site
+        extra = site.extra or {}
+        pattern_text = extra.get("detail_response_pattern")
+        if not pattern_text:
+            return
+        rx = re.compile(pattern_text)
+        template = extra.get("detail_click_selector") or ':text-matches("{pro_rx}") >> nth=0'
+        settle = float(extra.get("detail_settle_s", 1.5))
+        timeout = float(extra.get("detail_timeout_s", 20))
+        for normalized, pro in keys.items():
+            if outcomes.get(pro) != "found":
+                continue
+            digits = normalized if normalized.isdigit() else _pro_digits(normalized)
+            pro_rx = r"\D*".join(digits)
+            selector = template.replace("{pro_rx}", pro_rx.replace("\\", "\\\\")).replace("{pro}", digits)
+            try:
+                async def _open() -> None:
+                    await session.click(selector)
+                got = await session.capture_all(
+                    _open, timeout_s=timeout, settle_s=settle,
+                    until=lambda rs: any(rx.search(r.url) and r.status == 200 for r in rs))
+                details = [r for r in got if rx.search(r.url) and r.status == 200 and r.json]
+                if not details:
+                    log(logger, logging.WARNING, "no full-details response after click",
+                        pro=pro, selector=selector)
+                else:
+                    one = {normalized: pro}
+                    for response in details:
+                        if not self._assign_single_batch_response(
+                                response, spec, one, site, received, outcomes, summaries,
+                                allow_unmatched_not_found=False):
+                            self._record_pro_response(pro, response.json, spec, received, outcomes, summaries)
+            except Exception as exc:
+                log(logger, logging.WARNING, "full-details capture failed",
+                    pro=pro, error=type(exc).__name__, detail=str(exc)[:200])
+            back = extra.get("detail_back_selector")
+            try:
+                if back and await session.is_visible(back):
+                    await session.click(back)
+                else:
+                    await session.evaluate("() => history.back()")
+            except Exception:
+                pass
+            await asyncio.sleep(float(extra.get("detail_back_settle_s", 1.0)))
 
     def _single_batch_item_pro_path(self, site) -> str:
         extra = site.extra or {}
@@ -588,6 +671,7 @@ class BatchScraper:
         received: dict[str, Any],
         outcomes: dict[str, CaptureOutcome],
         summaries: dict[str, dict[str, Any]],
+        allow_unmatched_not_found: bool = True,
     ) -> bool:
         """Map one Saia-style batch API payload (top-level JSON array) onto each PRO in the chunk."""
         raw = response.json
@@ -599,21 +683,23 @@ class BatchScraper:
                     raw = values[0]
             elif "data" in raw and isinstance(raw["data"], list):
                 raw = raw["data"]
-            elif "referenceNumbers" in raw or "shipment" in raw:
+            elif any(key in raw for key in (
+                "referenceNumbers", "shipment", "proNumber", "shipmentInformation", "history",
+            )):
                 raw = [raw]
         if not isinstance(raw, list):
             return False
         item_pro_path = self._single_batch_item_pro_path(site)
         matched: set[str] = set()
         for item in raw:
-            for value in _path_values(item, item_pro_path):
+            for value in _path_values_any(item, item_pro_path):
                 normalized = normalize_pro(value, spec)
                 if normalized not in keys:
                     continue
                 matched.add(normalized)
                 self._record_pro_response(keys[normalized], item, spec, received, outcomes, summaries)
         if matched:
-            if (site.extra or {}).get("single_batch_unmatched_is_not_found"):
+            if allow_unmatched_not_found and (site.extra or {}).get("single_batch_unmatched_is_not_found"):
                 unmatched = set(keys) - matched
                 for normalized in unmatched:
                     pro = keys[normalized]
@@ -650,7 +736,7 @@ class BatchScraper:
         return found
 
     def _matched_keys(self, raw: Any, path: str, keys: dict[str, str], spec: CarrierSpec) -> set[str]:
-        return {normalized for value in _path_values(raw, path)
+        return {normalized for value in _path_values_any(raw, path)
                 if (normalized := normalize_pro(value, spec)) in keys}
 
     async def _carrier_not_found_message(self, session: BrowserSession, spec: CarrierSpec) -> str | None:

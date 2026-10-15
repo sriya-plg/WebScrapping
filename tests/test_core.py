@@ -116,3 +116,19 @@ def test_client_folder_resolution_and_discovery():
     p = build_payload(s, TrackingResult(reference="1", ref_type="PRO", carrier_code="ESTES", bill_to="CALIX",
                                         delivery_date="2026-10-01T10:00"), ACCT, "r")
     assert p["housebill"] == "1" and p["deliveryDate"] == "2026-10-01"
+
+
+def test_run_file_logger_creates_per_run_file(tmp_path):
+    import logging
+    from app.logging_setup import run_file_logger
+
+    test_logger = logging.getLogger("test_run")
+    with run_file_logger(run_id="abc123test", logs_dir=tmp_path) as log_file:
+        test_logger.info("testing per-run file logger")
+        assert log_file.exists()
+        assert "run_" in log_file.name
+        assert "abc123test" in log_file.name
+
+    content = log_file.read_text(encoding="utf-8")
+    assert "testing per-run file logger" in content
+

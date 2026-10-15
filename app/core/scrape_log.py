@@ -37,6 +37,9 @@ def extracted_summary(result: TrackingResult | None) -> dict[str, Any]:
         "eta": result.eta,
         "pieces": result.pieces,
         "weight": result.weight,
+        "service_level": result.service_level,
+        "pod_name": result.pod_name,
+        "pod_datetime": result.pod_datetime,
         "events": len(result.events),
     }
 
@@ -125,3 +128,40 @@ def log_extracted_fields(
             pro,
             json_preview(result.model_dump(exclude={"raw"}), max_chars=max_chars),
         )
+
+
+def log_scrape_and_tms(
+    *,
+    housebill: str,
+    pro: str,
+    scrape_outcome: str,
+    raw: Any,
+    result: TrackingResult | None,
+    payload: dict[str, Any],
+    payload_map: dict[str, str] | None = None,
+    scrape_max_chars: int = 20000,
+) -> None:
+    """Log carrier scrape JSON, then the exact AddCarrierActivity body from payload_map."""
+    log(
+        logger,
+        logging.INFO,
+        "scrape capture + TMS payload",
+        housebill=housebill,
+        pro=pro,
+        scrape_outcome=scrape_outcome,
+        bill_to=payload.get("billTo"),
+        carrier_code=payload.get("carrierCode"),
+        mapped=extracted_summary(result),
+        event_count=len(payload.get("events") or []),
+        payload_keys=list(payload.keys()),
+        payload_map_keys=list(payload_map or {}),
+    )
+    scrape_text = json_preview(raw, max_chars=scrape_max_chars) if raw is not None else "(no JSON captured)"
+    logger.info(
+        "--- scrape capture housebill=%s pro=%s ---\n%s\n--- end scrape capture ---",
+        housebill, pro, scrape_text,
+    )
+    logger.info(
+        "--- TMS payload (AddCarrierActivity / payload_map) housebill=%s pro=%s ---\n%s\n--- end TMS payload ---",
+        housebill, pro, json.dumps(payload, indent=2, default=str, ensure_ascii=False),
+    )

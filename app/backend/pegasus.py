@@ -47,7 +47,13 @@ def parse_shipments(data: Any, account: CarrierAccount, spec: CarrierSpec) -> Pe
     # API's PRO is the specified search reference. Keep housebill available as metadata.
     records = []
     seen: set[tuple[str, str]] = set()
+    requested = str(account.carrier_code or "").strip().casefold()
+    mismatched = 0
     for row in rows:
+        row_code = str(row.get("carrierCode") or "").strip().casefold()
+        if row_code and requested and row_code != requested:
+            mismatched += 1  # housebill belongs to another carrier: never search its PRO
+            continue
         pro, bill = row.get("proNumber"), row.get("housebill")
         if pro in (None, ""):
             continue
@@ -58,6 +64,9 @@ def parse_shipments(data: Any, account: CarrierAccount, spec: CarrierSpec) -> Pe
         seen.add(key)
         records.append({"proNumber": pro, "housebill": str(bill) if bill is not None else "",
                         "vendorId": str(row.get("vendorId", ""))})
+    if mismatched:
+        log(logger, logging.INFO, "shipments skipped: carrier code mismatch",
+            carrier_code=account.carrier_code, bill_to=account.bill_to, skipped=mismatched)
     return parse_pending({"data": records}, account, spec)
 
 
@@ -116,8 +125,8 @@ class PegasusBackend(BackendClient):
     async def post_tracking(self, account, spec, run_id, items):
         await self.output.post_tracking(account, spec, run_id, items)
 
-    async def add_carrier_activity(self, payload: dict[str, Any]) -> None:
-        await self.output.add_carrier_activity(payload)
+    async def add_carrier_activity(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        return await self.output.add_carrier_activity(payload)
 
     async def close(self):
         await self.http.aclose()

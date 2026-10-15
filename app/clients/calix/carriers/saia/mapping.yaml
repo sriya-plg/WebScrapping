@@ -1,15 +1,11 @@
 # Calix x Saia
 #
-# client.yaml (Calix folder)
-#   billTo codes, pending API shape, payload_map -> Pegasus/backend field names
-#
-# mapping.yaml (this file)
-#   mapping.*     : carrier JSON -> common TrackingResult (used when posting results)
-#   site.*        : how BatchScraper drives saia.com (selectors, network pattern, login)
-#   browser/limits: automation profile (not hardcoded in Python; per-carrier overrides)
-#
-# adapter.py      : optional; Cloudflare wait + reCAPTCHA on the AccountJob/adapter path only.
-#                   HTTP run-once today uses BatchScraper + site.* below (not adapter.py).
+# How mapping works (all carriers, including future ones):
+#   1. site.response_url_*   capture the carrier's network JSON (prefer the complete API)
+#   2. mapping.fields/events  carrier JSON -> TrackingResult  (edit dotted paths here)
+#   3. client.yaml activity.* TrackingResult + ctx -> AddCarrierActivity
+# Use `|` for first-non-empty fallbacks so find-full-details and find-by-pro can share one map.
+# `=literal` in activity.payload_map pins a constant (see client.yaml).
 
 aliases: [SAIA_LTL, SAI001]
 
@@ -41,20 +37,26 @@ site:
   delimiter: "\n"
   batch_size: 30
 
-  response_url_pattern: /api/v1/tracking/find-by-pro-number
+  # Capture both APIs; prefer the complete payload when the page also calls it.
+  response_url_pattern: '(?i)/api/v1/tracking/(find-full-details?|find-by-pro-number)'
+  # find-by-pro-number (fullDetails=false) is the list; find-full-details only fires when a row is opened.
+  # Do NOT set response_url_prefer: it would make the batch wait for a response that never comes.
   expected_response_shape: single_batch
-  response_pro_path: "[].referenceNumbers.proNumber"
+  response_pro_path: "[].proNumber|[].referenceNumbers.proNumber"
   strip_spaces_dashes: true
   extra:
     # Saia UI: enter 11-digit PROs (drop the 12th check digit from the backend value).
     pro_input_digits: 11
-    # Batch-only search (same knobs as Estes; per-carrier in mapping.yaml, not global Python).
     retry_missing_individually: false
     single_batch_unmatched_is_not_found: true
     return_to_tracking_after_submit: true
     batch_collect_all_responses: true
-    single_batch_item_pro_path: referenceNumbers.proNumber
+    single_batch_item_pro_path: proNumber|referenceNumbers.proNumber
     landing_settle_s: 2.5
+    # Open each PRO row to trigger the per-PRO full-details API (overwrites the list data).
+    detail_response_pattern: '(?i)/api/v1/tracking/find-full-details'
+    # TODO: adjust if the PRO row is not plain text; {pro_rx} matches the PRO with any separators.
+    detail_click_selector: ':text-matches("{pro_rx}") >> nth=0'
 
   response_timeout_s: 45
   idle_window_s: 2
@@ -79,13 +81,35 @@ site:
 mapping:
   auto: true
   fields:
-    reference: "referenceNumbers.proNumber|[0].referenceNumbers.proNumber"
-    status: "shipment.status|[0].shipment.status"
-    pickup_date: "shipment.pickupDate|[0].shipment.pickupDate"
-    delivery_date: "delivery.deliveredDate|[0].delivery.deliveredDate"
-    eta: "delivery.expectedDate|[0].delivery.expectedDate"
-    origin: "shipper.companyName|[0].shipper.companyName|shipper.address.city"
-    destination: "consignee.companyName|[0].consignee.companyName|consignee.address.city"
+    reference: "proNumber|referenceNumbers.proNumber|[0].proNumber|[0].referenceNumbers.proNumber"
+    status: "shipmentInformation.status|shipment.status|[0].shipmentInformation.status|[0].shipment.status"
+    pickup_date: "shipmentInformation.pickupDate|shipment.pickupDate|[0].shipmentInformation.pickupDate"
+    delivery_date: "deliveryInformation.deliveryDate|delivery.deliveredDate|[0].deliveryInformation.deliveryDate"
+    eta: "deliveryInformation.expectedDeliveryDate|delivery.expectedDate"
+    origin: "shipper.name|shipper.companyName|shipper.city|shipper.address.city"
+    destination: "consignee.name|consignee.companyName|consignee.city|consignee.address.city"
+    pieces: "shipmentInformation.totalPieces|shipment.pieces"
+    weight: "shipmentInformation.totalWeight|shipment.weight"
+    service_level: "shipmentInformation.type|shipment.serviceLevel|shipment.service"
+    pod_name: "deliveryInformation.signature|delivery.signedBy|delivery.podName|delivery.signature"
+    pod_datetime: "deliveryInformation.deliveryDate|delivery.deliveredDate|delivery.podDateTime"
+  compose:
+    # signature is POD name; delivery date + time.to is POD datetime
+    pod_datetime: "{deliveryInformation.deliveryDate|delivery.deliveredDate} {deliveryInformation.deliveryTime.to|delivery.deliveredTime}"
+  events:
+    path: "history|trackingHistory|statusHistory|events|[0].history"
+    fields:
+      timestamp: date|eventDate|eventDateTime|datetime|timestamp
+      description: activity|description|statusDescription
+      location: city|location
+      status: activity|status|statusDescription
+      code: activity|statusCode|code|status
+      timezone: timezone|tz
+      lat: latitude|lat
+      long: longitude|lng|long
+    compose:
+      timestamp: "{date} {time}"
+      location: "{city}, {state}"
   status_map:
     Delivered: DELIVERED
     "Delivery Completed - OK": DELIVERED

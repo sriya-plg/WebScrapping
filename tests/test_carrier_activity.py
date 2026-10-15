@@ -32,6 +32,23 @@ def _job(housebill: str, pro: str) -> TrackingJob:
     )
 
 
+def test_event_code_is_capped_at_50_characters():
+    job = _job("HB123", "184-8684463")
+    long_status = "En route to delivery facility at Marshall, MI (095)"
+    assert len(long_status) > 50
+    result = TrackingResult(
+        reference="1848684463", ref_type="PRO", carrier_code="ESTE03", bill_to="134034",
+        status="DELIVERED",
+        events=[{"timestamp": "2026-10-07T13:01:59-05:00", "description": "Actual Delivery", "status": long_status}],
+    )
+    start = datetime(2026, 10, 11, 7, 22, 20, tzinfo=timezone.utc)
+    payload = build_add_carrier_activity(
+        job, result, outcome="found", summary={}, ml_start=start, ml_end=start, ml_status=2, ml_log="ok",
+    )
+    assert len(payload["events"][0]["code"]) == 50
+    assert payload["events"][0]["code"] == long_status[:50]
+
+
 def test_pegasus_datetime_format():
     assert pegasus_datetime("2026-10-11T07:22:20.874Z") == "2026-10-11T07:22:20Z"
     assert pegasus_datetime(datetime(2026, 10, 11, 7, 22, 20, tzinfo=timezone.utc)) == "2026-10-11T07:22:20Z"
@@ -100,11 +117,80 @@ def test_post_scrape_activities_one_per_housebill():
     assert "missing" in by_hb["H2"]["mlLog"]
 
 
+def test_post_logs_scrape_capture_and_tms_payload(caplog):
+    jobs = [_job("H1", "p1")]
+    raw = {"referenceNumbers": {"proNumber": "p1"}, "shipment": {"status": "In Transit"}}
+    outcome = ScrapeBatchResult(
+        requested=["p1"], received={"p1": raw}, outcomes={"p1": "found"}, summaries={"p1": {}},
+    )
+    spec = make_spec("single_batch", batch_size=1)
+    spec.site.response_pro_path = "referenceNumbers.proNumber"
+    spec.mapping.fields = {"reference": "referenceNumbers.proNumber", "status": "shipment.status"}
+    spec.mapping.status_map = {"In Transit": "IN_TRANSIT"}
+
+    class Settings:
+        dry_run = False
+
+    with caplog.at_level("INFO"):
+        asyncio.run(post_scrape_activities(Settings(), RecordingBackend(), jobs, spec, "run1", outcome))
+    text = caplog.text
+    assert "--- scrape capture housebill=H1 pro=p1 ---" in text
+    assert '"proNumber": "p1"' in text
+    assert "--- TMS payload (AddCarrierActivity / payload_map)" in text
+    assert '"billTo": 134034' in text
+    assert '"carrierCode": "SAI001"' in text
+    assert '"housebill": "H1"' in text
+
+
 def test_pegasus_ml_status_maps_outcomes():
     spec = make_spec("single_batch", batch_size=1)
     assert pegasus_ml_status(spec, "ok") == 2
     assert pegasus_ml_status(spec, "not_found") == 4
     assert pegasus_ml_status(spec, "no_response") == 3
+
+
+def test_bill_to_not_overwritten_by_tracking_result():
+    job = _job("HB123", "771043317403")
+    result = TrackingResult(
+        reference="771043317403",
+        ref_type="PRO",
+        carrier_code="SAIA",
+        bill_to="CALIX",
+        status="DELIVERED",
+    )
+    start = datetime.now(timezone.utc)
+    payload = build_add_carrier_activity(
+        job, result, outcome="found", summary={}, ml_start=start, ml_end=start,
+        ml_status=2, ml_log="ok",
+    )
+    assert payload["billTo"] == 134034
+    assert payload["carrierCode"] == "SAI001"
+    assert "billTo" in payload
+
+
+def test_rejected_api_body_counts_as_failed():
+    jobs = [_job("H1", "p1")]
+    outcome = ScrapeBatchResult(
+        requested=["p1"],
+        received={"p1": {"referenceNumbers": {"proNumber": "p1"}, "shipment": {"status": "In Transit"}}},
+        outcomes={"p1": "found"},
+        summaries={"p1": {}},
+    )
+    spec = make_spec("single_batch", batch_size=1)
+    spec.site.response_pro_path = "referenceNumbers.proNumber"
+    spec.mapping.fields = {"reference": "referenceNumbers.proNumber", "status": "shipment.status"}
+
+    class RejectingBackend:
+        async def add_carrier_activity(self, payload):
+            assert payload["billTo"] == 134034
+            return {"ok": True, "status_code": 200, "body": {"isSuccess": False, "message": "rejected"}}
+
+    class Settings:
+        dry_run = False
+
+    stats = asyncio.run(post_scrape_activities(Settings(), RejectingBackend(), jobs, spec, "run1", outcome))
+    assert stats["posted"] == 0
+    assert stats["failed"] == 1
 
 
 def test_not_found_sets_ml_status():

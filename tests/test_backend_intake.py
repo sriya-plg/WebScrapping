@@ -22,6 +22,38 @@ def backend(handler):
     return result
 
 
+def test_add_carrier_activity_returns_http_response():
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"isSuccess": True, "id": 99})
+
+    client = HttpBackend(BackendSettings(base_url="https://backend.test"))
+    transport = httpx.MockTransport(handler)
+    client.http = httpx.AsyncClient(base_url="https://backend.test", transport=transport)
+    client.http_activity = httpx.AsyncClient(base_url="https://backend.test", transport=transport)
+
+    payload = {
+        "housebill": "23673123", "proNumber": "771377522906", "carrierCode": "SAI001",
+        "billTo": 134034, "mlStatus": 2, "events": [],
+    }
+
+    async def run():
+        try:
+            result = await client.add_carrier_activity(payload)
+            assert captured["body"]["billTo"] == 134034
+            assert result["ok"] is True
+            assert result["status_code"] == 200
+            assert result["body"]["isSuccess"] is True
+            assert result["body"]["id"] == 99
+        finally:
+            await client.http.aclose()
+            await client.http_activity.aclose()
+
+    asyncio.run(run())
+
+
 def test_get_carrier_shipment_details_new_schema():
     """GetCarrierShipmentDetails: numeric housebill, no vendorId; optional carrier/status fields."""
     payload = [

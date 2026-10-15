@@ -13,7 +13,7 @@ from app.core.metrics import RunMetrics
 from app.core.resilience import CircuitBreaker, Pacer, retry
 from app.core.batch_updates import enqueue_tracking_updates
 from app.core.scraper import BatchScraper
-from app.logging_setup import carrier_var, client_var, log, register_secret, run_id_var
+from app.logging_setup import carrier_var, client_var, log, register_secret, run_file_logger, run_id_var
 from app.models import CarrierAccount
 from app.settings import CarrierSpec, SpecResolver
 
@@ -47,13 +47,28 @@ class Runner:
     async def run_once(self, only: set[str] | None = None, force: bool = False,
                        only_clients: set[str] | None = None) -> dict:
         async with self._run_lock:
-            return await self._run_once(only, force, only_clients)
+            run_id = uuid.uuid4().hex[:12]
+            run_id_var.set(run_id)
+            logs_dir = getattr(self.sv.settings, "logs_dir", "logs")
+            with run_file_logger(run_id=run_id, logs_dir=logs_dir) as log_file:
+                logger.info("run started | run_id=%s log_file=%s", run_id, log_file)
+                try:
+                    res = await self._run_once(only, force, only_clients)
+                    logger.info("run finished | run_id=%s log_file=%s", run_id, log_file)
+                    return res
+                except Exception as exc:
+                    logger.exception("run failed | run_id=%s log_file=%s error=%s", run_id, log_file, exc)
+                    raise
 
     async def _run_once(self, only: set[str] | None = None, force: bool = False,
                         only_clients: set[str] | None = None) -> dict:
         if hasattr(self.sv.backend, "get_carrier_configs") and hasattr(self.sv.backend, "get_shipments"):
             return await self._run_batch_once(only, only_clients)
-        ctx = RunContext(run_id=uuid.uuid4().hex[:12], metrics=RunMetrics())
+        rid = run_id_var.get()
+        if not rid or rid == "-":
+            rid = uuid.uuid4().hex[:12]
+            run_id_var.set(rid)
+        ctx = RunContext(run_id=rid, metrics=RunMetrics())
         run_id_var.set(ctx.run_id)
         t0, m = time.time(), ctx.metrics
         accounts = await retry(self.sv.backend.get_carrier_accounts, attempts=1, base=2, cap=30,
@@ -102,7 +117,10 @@ class Runner:
     async def _run_batch_once(self, only: set[str] | None, only_clients: set[str] | None) -> dict:
         """Phase 2 path: intake groups -> browser batches -> raw results, isolated per carrier."""
         started = time.time()
-        run_id_var.set(uuid.uuid4().hex[:12])
+        rid = run_id_var.get()
+        if not rid or rid == "-":
+            rid = uuid.uuid4().hex[:12]
+            run_id_var.set(rid)
         grouped = await build_jobs(self.sv.backend)
         groups: dict[tuple[int, str], list] = {}
         for carriers in grouped.values():

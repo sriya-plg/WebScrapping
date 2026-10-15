@@ -27,7 +27,7 @@ logger = logging.getLogger("main")
 def build(args):
     s = load_settings(args.config)
     s.dry_run = s.dry_run or getattr(args, "dry_run", False)
-    setup_logging(s.log_level, s.log_format)
+    setup_logging(s.log_level, s.log_format, s.logs_dir)
     for e in registry.discover():
         logger.error("adapter import failed: %s", e)
     store = StateStore(s.state_db)
