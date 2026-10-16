@@ -149,6 +149,7 @@ def _activity_ctx(
     ml_status: int,
     ml_log: str,
     ml_error: str,
+    preserve_pod_datetime: bool = False,
 ) -> dict[str, Any]:
     bill_to = job.carrier.bill_to
     try:
@@ -169,7 +170,10 @@ def _activity_ctx(
         "ml_error": (ml_error or "")[:2000],
         "service_level": (result.service_level if result else None) or "",
         "pod_name": pod_name,
-        "pod_datetime": pegasus_datetime(pod_dt or None, fallback=ml_end),
+        "pod_datetime": (
+            pod_dt if preserve_pod_datetime and pod_dt
+            else pegasus_datetime(pod_dt or None, fallback=ml_end)
+        ),
         "reference": (result.reference if result else job.search_value) or "",
     }
 
@@ -193,9 +197,11 @@ def build_add_carrier_activity(
     Carrier-mapped fields (service_level, pod_*, events) come from TrackingResult.
     Change paths in client.yaml or the carrier mapping.yaml — not this function.
     """
+    activity = spec.activity if spec is not None else ActivityConfig()
     ctx = _activity_ctx(
         job, result, ml_start=ml_start, ml_end=ml_end,
         ml_status=ml_status, ml_log=ml_log, ml_error=ml_error,
+        preserve_pod_datetime=activity.preserve_pod_datetime,
     )
     data: dict[str, Any] = dict(ctx)
     if result:
@@ -210,7 +216,6 @@ def build_add_carrier_activity(
     data["pod_datetime"] = get_path(data, "pod_datetime") or ctx["pod_datetime"]
     data["reference"] = get_path(data, "reference") or ctx["reference"]
 
-    activity = spec.activity if spec is not None else ActivityConfig()
     payload = apply_map(data, activity.payload_map)
     if payload.get("billTo") in (None, ""):
         payload["billTo"] = ctx["bill_to"]
@@ -230,6 +235,8 @@ def build_add_carrier_activity(
             payload[key] = ""
     for key in _DATETIME_PAYLOAD_KEYS:
         if key in payload:
+            if key == "podDateTime" and activity.preserve_pod_datetime:
+                continue
             payload[key] = pegasus_datetime(payload[key] or None, fallback=ml_end)
     if "mlLog" in payload:
         payload["mlLog"] = str(payload["mlLog"] or "")[:2000]

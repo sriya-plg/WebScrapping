@@ -483,7 +483,7 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
                 unique[identity] = event
             events = list(unique.values())
         delivery_zone = _delivery_zone_label(events)
-        if delivery_zone:
+        if delivery_zone and not spec.activity.preserve_pod_datetime:
             zoned = apply_zone_abbrev(vals.get("pod_datetime"), delivery_zone)
             if zoned:
                 vals["pod_datetime"] = zoned
