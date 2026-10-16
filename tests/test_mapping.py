@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from app.browser.base import CapturedResponse
 from app.core.carrier_activity import build_add_carrier_activity
 from app.core.mapper import normalize
+from app.core.scraper import BatchScraper
 from app.models import CarrierAccount, CarrierConfig, ShipmentRef, TrackingJob
 from app.settings import load_resolver
 from tests.test_batch_scraper import MockProvider, MockSession, make_jobs
-from app.browser.base import CapturedResponse
-from app.core.scraper import BatchScraper
 
 ROOT = Path(__file__).resolve().parents[1]
 RES = load_resolver(ROOT / "app/clients")
@@ -458,7 +458,7 @@ def test_forwardair_maps_without_system_timezone_database(monkeypatch):
 
 def test_time_offset_stripped_without_conversion():
     """Times like '15:18:00-05:00' must not be converted to UTC, but sent directly as 15:18:00."""
-    from app.core.mapper import strip_time_offset, get_path, compose_value
+    from app.core.mapper import compose_value, get_path, strip_time_offset
 
     # Unit tests for strip_time_offset helper
     assert strip_time_offset("15:18:00-05:00") == "15:18:00"

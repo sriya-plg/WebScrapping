@@ -14,7 +14,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.models import CarrierAccount, TrackingEvent, TrackingResult
 from app.settings import CarrierSpec
 
-
 _TIME_WITH_OFFSET_RX = re.compile(
     r"^(\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*[+-]\d{2}:?\d{2}$"
 )
