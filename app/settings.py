@@ -158,6 +158,8 @@ class ActivityConfig(_Strict):
     })
     payload_map: dict[str, str] = Field(default_factory=_default_activity_payload_map)
     events_map: dict[str, str] = Field(default_factory=_default_activity_events_map)
+    preserve_event_offsets: bool = False
+    preserve_pod_datetime: bool = False
 
 
 class MappingConfig(_Strict):

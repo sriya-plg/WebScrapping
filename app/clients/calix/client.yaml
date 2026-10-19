@@ -31,6 +31,7 @@ defaults:
       mlProcessTime: ctx.ml_process_time
       mlError: ctx.ml_error
       reference: reference
+      pieces: pieces
       podName: pod_name
       podDateTime: pod_datetime
     events_map:

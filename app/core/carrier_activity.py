@@ -8,14 +8,14 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
+
 from app.core.mapper import apply_map, get_path, normalize
 from app.core.scrape_log import log_scrape_and_tms
 from app.core.scraper import ScrapeBatchResult
 from app.logging_setup import log
 from app.models import CarrierAccount, CarrierConfig, TrackingJob, TrackingResult
 from app.settings import ActivityConfig, CarrierSpec
-
-import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,7 @@ def _activity_events(
     events_map: dict[str, str],
     *,
     fallback: datetime,
+    preserve_offsets: bool = False,
 ) -> list[dict[str, Any]]:
     if not result:
         return []
@@ -122,10 +123,11 @@ def _activity_events(
         # plgtst returns HTTP 500 when event code is longer than 50 characters.
         item["code"] = str(code)[:50]
         item["description"] = item.get("description") or ""
-        item["eventDateTime"] = pegasus_datetime(
-            item.get("eventDateTime") or event.timestamp or result.scraped_at,
-            fallback=fallback,
-        )
+        event_time = item.get("eventDateTime") or event.timestamp or result.scraped_at
+        if preserve_offsets and isinstance(event_time, str):
+            item["eventDateTime"] = event_time
+        else:
+            item["eventDateTime"] = pegasus_datetime(event_time, fallback=fallback)
         if item.get("timezone"):
             item["timezone"] = str(item["timezone"]).strip()
         else:
@@ -147,6 +149,7 @@ def _activity_ctx(
     ml_status: int,
     ml_log: str,
     ml_error: str,
+    preserve_pod_datetime: bool = False,
 ) -> dict[str, Any]:
     bill_to = job.carrier.bill_to
     try:
@@ -167,7 +170,10 @@ def _activity_ctx(
         "ml_error": (ml_error or "")[:2000],
         "service_level": (result.service_level if result else None) or "",
         "pod_name": pod_name,
-        "pod_datetime": pegasus_datetime(pod_dt or None, fallback=ml_end),
+        "pod_datetime": (
+            pod_dt if preserve_pod_datetime and pod_dt
+            else pegasus_datetime(pod_dt or None, fallback=ml_end)
+        ),
         "reference": (result.reference if result else job.search_value) or "",
     }
 
@@ -191,9 +197,11 @@ def build_add_carrier_activity(
     Carrier-mapped fields (service_level, pod_*, events) come from TrackingResult.
     Change paths in client.yaml or the carrier mapping.yaml — not this function.
     """
+    activity = spec.activity if spec is not None else ActivityConfig()
     ctx = _activity_ctx(
         job, result, ml_start=ml_start, ml_end=ml_end,
         ml_status=ml_status, ml_log=ml_log, ml_error=ml_error,
+        preserve_pod_datetime=activity.preserve_pod_datetime,
     )
     data: dict[str, Any] = dict(ctx)
     if result:
@@ -208,7 +216,6 @@ def build_add_carrier_activity(
     data["pod_datetime"] = get_path(data, "pod_datetime") or ctx["pod_datetime"]
     data["reference"] = get_path(data, "reference") or ctx["reference"]
 
-    activity = spec.activity if spec is not None else ActivityConfig()
     payload = apply_map(data, activity.payload_map)
     if payload.get("billTo") in (None, ""):
         payload["billTo"] = ctx["bill_to"]
@@ -228,12 +235,17 @@ def build_add_carrier_activity(
             payload[key] = ""
     for key in _DATETIME_PAYLOAD_KEYS:
         if key in payload:
+            if key == "podDateTime" and activity.preserve_pod_datetime:
+                continue
             payload[key] = pegasus_datetime(payload[key] or None, fallback=ml_end)
     if "mlLog" in payload:
         payload["mlLog"] = str(payload["mlLog"] or "")[:2000]
     if "mlError" in payload:
         payload["mlError"] = str(payload["mlError"] or "")[:2000]
-    payload["events"] = _activity_events(result, activity.events_map, fallback=ml_end)
+    payload["events"] = _activity_events(
+        result, activity.events_map, fallback=ml_end,
+        preserve_offsets=activity.preserve_event_offsets,
+    )
     return payload
 
 

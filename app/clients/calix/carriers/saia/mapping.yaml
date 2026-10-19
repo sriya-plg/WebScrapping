@@ -9,6 +9,11 @@
 
 aliases: [SAIA_LTL, SAI001]
 
+activity:
+  events_map:
+    city: city
+    state: state
+
 browser:
   browser_mode: patchright
   headless: false
@@ -105,6 +110,8 @@ mapping:
       status: activity|status|statusDescription
       code: activity|statusCode|code|status
       timezone: timezone|tz
+      city: city
+      state: state
       lat: latitude|lat
       long: longitude|lng|long
     compose:
