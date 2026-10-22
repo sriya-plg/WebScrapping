@@ -336,14 +336,34 @@ class PlaywrightProvider(BrowserProvider):
         else:
             from playwright.async_api import async_playwright
         self._pw = await async_playwright().start()
-        kw: dict[str, Any] = {"headless": self.cfg.headless}
+
+        headless = self.cfg.headless
+        env_headless = os.environ.get("BROWSER_HEADLESS") or os.environ.get("HEADLESS")
+        if env_headless is not None:
+            headless = env_headless.lower() in ("true", "1", "yes")
+        elif os.name == "posix" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            headless = True
+
+        kw: dict[str, Any] = {"headless": headless}
         if self.cfg.channel:
             kw["channel"] = self.cfg.channel
         if self.cfg.proxy:
             kw["proxy"] = self.cfg.proxy
         if self.engine == "playwright":
             kw["args"] = ["--disable-blink-features=AutomationControlled"]
-        self._browser = await self._pw.chromium.launch(**kw)
+        try:
+            self._browser = await self._pw.chromium.launch(**kw)
+        except Exception as exc:
+            if kw.get("channel"):
+                import logging
+                logging.getLogger(__name__).warning(
+                    "launching browser with channel=%r failed: %s; falling back to default chromium",
+                    kw["channel"], exc,
+                )
+                kw.pop("channel", None)
+                self._browser = await self._pw.chromium.launch(**kw)
+            else:
+                raise
 
     async def open_session(self, key: str) -> BrowserSession:
         await self._start()

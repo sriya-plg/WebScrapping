@@ -73,6 +73,7 @@ async def daemon(s, runner, store):
 
 
 def main():
+    import os
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/app.yaml")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -81,11 +82,19 @@ def main():
     r.add_argument("--carrier", action="append")
     r.add_argument("--force", action="store_true")
     r.add_argument("--dry-run", action="store_true")
-    sub.add_parser("daemon")
+    r.add_argument("--headless", action="store_true", default=None, help="Force headless browser mode")
+    r.add_argument("--headed", action="store_true", default=None, help="Force headed browser mode")
+    d = sub.add_parser("daemon")
+    d.add_argument("--headless", action="store_true", default=None, help="Force headless browser mode")
+    d.add_argument("--headed", action="store_true", default=None, help="Force headed browser mode")
     a = sub.add_parser("assist")
     a.add_argument("carrier")
     a.add_argument("--client", required=True)
     args = ap.parse_args()
+    if getattr(args, "headless", None):
+        os.environ["BROWSER_HEADLESS"] = "true"
+    elif getattr(args, "headed", None):
+        os.environ["BROWSER_HEADLESS"] = "false"
     s, sv, resolver, runner = build(args)
     if args.cmd == "run-once":
         asyncio.run(runner.run_once({c.upper() for c in args.carrier} if args.carrier else None, args.force,

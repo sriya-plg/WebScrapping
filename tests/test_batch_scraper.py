@@ -522,3 +522,19 @@ def test_get_path_handles_unpacked_dict_with_index_zero():
     assert get_path(raw_dict, "[0].shipment.status") == "In Transit"
 
 
+def test_setup_failure_records_error_with_pros(tmp_path):
+    class CrashingProvider(BrowserProvider):
+        async def open_session(self, key: str) -> BrowserSession:
+            raise RuntimeError("Browser launch failed: DISPLAY missing")
+        async def close(self): pass
+
+    spec = make_spec("per_pro", batch_size=2)
+    jobs = make_jobs(["PRO1", "PRO2"])
+    result = asyncio.run(BatchScraper(CrashingProvider(), spec, str(tmp_path)).run_batch(jobs, spec))
+
+    assert len(result.errors) == 1
+    assert result.errors[0]["type"] == "RuntimeError"
+    assert "PRO1,PRO2" in result.errors[0]["pros"]
+    assert result.missing == ["PRO1", "PRO2"]
+
+

@@ -296,7 +296,16 @@ class BatchScraper:
         except Exception as exc:
             if session and await session.looks_blocked(spec.block_markers or None):
                 exc = ChallengeError("carrier challenge detected")
-            result.errors.append({"type": type(exc).__name__, "message": self._safe_error(exc, secrets)})
+            safe_msg = self._safe_error(exc, secrets)
+            log(logger, logging.ERROR, "batch scrape setup failed",
+                client=spec.client, carrier_code=spec.code,
+                error=type(exc).__name__, message=safe_msg)
+            logger.exception("batch scrape setup failed for %s/%s: %s", spec.client, spec.code, safe_msg)
+            result.errors.append({
+                "type": type(exc).__name__,
+                "pros": ",".join(result.requested),
+                "message": safe_msg,
+            })
             if session:
                 await self._clear_credentials(session, spec)
                 await self._diagnose(session, spec, "setup", secrets)
