@@ -49,7 +49,7 @@ site:
     tag_input_enter: true
     skip_tracking_input_verify: true
     submit_force_click: true
-    retry_missing_individually: false
+    retry_missing_individually: true
     batch_collect_all_responses: true
     return_to_tracking_after_submit: true
     single_batch_array_path: results
