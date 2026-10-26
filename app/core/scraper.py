@@ -6,6 +6,8 @@ import json
 import logging
 import random
 import re
+import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -13,15 +15,16 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.browser.base import BrowserProvider, BrowserSession, CapturedResponse
 from app.core.adapter import DEFAULT_CONSENT_SELECTORS, session_key
+from app.core.diagnostics import check_block_page, save_failure_artifacts, traced_step
 from app.core.login import execute_login
 from app.core.mapper import get_path
-from app.logging_setup import carrier_var, client_var, log
+from app.logging_setup import carrier_var, client_var, log, run_id_var
 from app.models import TrackingJob
 from app.settings import CarrierSpec
 
 logger = logging.getLogger(__name__)
 
-CaptureOutcome = str  # found | not_found | captured
+CaptureOutcome = str  # found | not_found | captured | error | missing
 
 
 class ChallengeError(RuntimeError):
@@ -40,6 +43,11 @@ class ScrapeBatchResult:
     errors: list[dict[str, str]] = field(default_factory=list)
     outcomes: dict[str, CaptureOutcome] = field(default_factory=dict)
     summaries: dict[str, dict[str, Any]] = field(default_factory=dict)
+    failed_step: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+    traceback_summary: str | None = None
+    first_error: str | None = None
 
     def scrape_items(self) -> list[dict[str, Any]]:
         """Per-PRO raw carrier JSON for a future map/post step."""
@@ -248,7 +256,7 @@ class BatchScraper:
             session = await self.provider.open_session(session_key(spec))
             log(logger, logging.INFO, "browser session opened", bill_to=config.bill_to,
                 job_count=len(jobs), batch_size=spec.site.batch_size)
-            await self._open_and_login(session, jobs[0], spec)
+            await self._open_and_login(session, jobs[0], spec, secrets)
             site = spec.site
             log(logger, logging.INFO, "tracking page ready",
                 page_url=_safe_url(session.current_url() or "", secrets), job_count=len(jobs))
@@ -268,15 +276,38 @@ class BatchScraper:
                     await self._submit(session, chunk, spec, pattern, keys, result.received,
                                        result.outcomes, result.summaries)
                 except Exception as exc:
+                    failed_step = getattr(exc, "failed_step", "chunk_submit")
+                    err_type = type(exc).__name__
+                    safe_msg = self._safe_error(exc, secrets)
+                    tb_summary = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-1000:]
+                    first_err = f"{err_type}@{failed_step}"
+
+                    if not result.first_error:
+                        result.failed_step = failed_step
+                        result.error_type = err_type
+                        result.error_message = safe_msg[:500]
+                        result.traceback_summary = tb_summary
+                        result.first_error = first_err
+
                     if await session.looks_blocked(spec.block_markers or None):
                         exc = ChallengeError("carrier challenge detected")
-                    log(logger, logging.WARNING, "tracking batch failed", stage="chunk",
-                        error=type(exc).__name__, detail=self._safe_error(exc, secrets))
-                    log(logger, logging.INFO, "scrape failure details", stage="chunk",
-                        error=type(exc).__name__, detail=self._safe_error(exc, secrets),
-                        pro_count=len(chunk))
-                    result.errors.append({"type": type(exc).__name__, "pros": ",".join(
-                        job.search_value for job in chunk), "message": self._safe_error(exc, secrets)})
+                    log(logger, logging.ERROR, "tracking batch failed", stage="chunk",
+                        error=type(exc).__name__, detail=safe_msg, failed_step=failed_step)
+                    logger.exception("tracking batch failed for chunk %d at step '%s': %s",
+                                     chunk_index + 1, failed_step, safe_msg)
+                    result.errors.append({
+                        "type": type(exc).__name__,
+                        "pros": ",".join(job.search_value for job in chunk),
+                        "message": safe_msg,
+                        "failed_step": failed_step,
+                    })
+                    try:
+                        page = getattr(session, "page", None)
+                        context = getattr(session, "context", None)
+                        if page:
+                            await save_failure_artifacts(page, context, run_id_var.get() or "", spec.code, failed_step)
+                    except Exception:
+                        pass
                     await self._diagnose(session, spec, "chunk", secrets)
                 finally:
                     await self._return_to_tracking(session, jobs[0], spec)
@@ -292,15 +323,35 @@ class BatchScraper:
                             await self._submit(session, [job], spec, pattern, {key: job.search_value},
                                                result.received, result.outcomes, result.summaries)
                         except Exception as exc:
+                            failed_step = getattr(exc, "failed_step", "fallback_submit")
+                            err_type = type(exc).__name__
+                            safe_msg = self._safe_error(exc, secrets)
+                            if not result.first_error:
+                                result.failed_step = failed_step
+                                result.error_type = err_type
+                                result.error_message = safe_msg[:500]
+                                result.first_error = f"{err_type}@{failed_step}"
+
                             if await session.looks_blocked(spec.block_markers or None):
                                 exc = ChallengeError("carrier challenge detected")
-                            log(logger, logging.WARNING, "tracking batch failed", stage="fallback",
+                            log(logger, logging.ERROR, "tracking fallback failed", stage="fallback",
                                 pro=job.search_value, error=type(exc).__name__,
-                                detail=self._safe_error(exc, secrets))
-                            log(logger, logging.INFO, "scrape failure details", stage="fallback",
-                                error=type(exc).__name__, detail=self._safe_error(exc, secrets))
-                            result.errors.append({"type": type(exc).__name__, "pro": job.search_value,
-                                                  "message": self._safe_error(exc, secrets)})
+                                detail=safe_msg, failed_step=failed_step)
+                            logger.exception("tracking fallback failed for pro=%s at step '%s': %s",
+                                             job.search_value, failed_step, safe_msg)
+                            result.errors.append({
+                                "type": type(exc).__name__,
+                                "pro": job.search_value,
+                                "message": safe_msg,
+                                "failed_step": failed_step,
+                            })
+                            try:
+                                page = getattr(session, "page", None)
+                                context = getattr(session, "context", None)
+                                if page:
+                                    await save_failure_artifacts(page, context, run_id_var.get() or "", spec.code, failed_step)
+                            except Exception:
+                                pass
                             await self._diagnose(session, spec, "fallback", secrets)
                         finally:
                             await self._return_to_tracking(session, jobs[0], spec)
@@ -310,36 +361,77 @@ class BatchScraper:
                     log(logger, logging.INFO, "batch scrape complete (no per-PRO retry)",
                         chunk=chunk_index + 1, received=chunk_received, requested=len(chunk))
         except Exception as exc:
+            failed_step = getattr(exc, "failed_step", "batch_setup")
+            err_type = type(exc).__name__
+            safe_msg = self._safe_error(exc, secrets)
+            tb_summary = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-1000:]
+            first_err = f"{err_type}@{failed_step}"
+
+            result.failed_step = result.failed_step or failed_step
+            result.error_type = result.error_type or err_type
+            result.error_message = result.error_message or safe_msg[:500]
+            result.traceback_summary = result.traceback_summary or tb_summary
+            result.first_error = result.first_error or first_err
+
             if session and await session.looks_blocked(spec.block_markers or None):
                 exc = ChallengeError("carrier challenge detected")
-            safe_msg = self._safe_error(exc, secrets)
+                err_type = "ChallengeError"
+                safe_msg = "carrier challenge detected"
+                first_err = f"{err_type}@{failed_step}"
+
             log(logger, logging.ERROR, "batch scrape setup failed",
                 client=spec.client, carrier_code=spec.code,
-                error=type(exc).__name__, message=safe_msg)
+                error=err_type, message=safe_msg, failed_step=failed_step)
             log(logger, logging.INFO, "scrape failure details", stage="setup",
-                error=type(exc).__name__, detail=safe_msg)
-            logger.exception("batch scrape setup failed for %s/%s: %s", spec.client, spec.code, safe_msg)
+                error=err_type, detail=safe_msg, failed_step=failed_step)
+            logger.exception("batch scrape setup failed for %s/%s at step '%s': %s",
+                             spec.client, spec.code, failed_step, safe_msg)
             result.errors.append({
-                "type": type(exc).__name__,
+                "type": err_type,
                 "pros": ",".join(result.requested),
                 "message": safe_msg,
+                "failed_step": failed_step,
             })
             if session:
+                try:
+                    page = getattr(session, "page", None)
+                    context = getattr(session, "context", None)
+                    if page:
+                        await save_failure_artifacts(page, context, run_id_var.get() or "", spec.code, failed_step)
+                except Exception:
+                    pass
                 await self._clear_credentials(session, spec)
                 await self._diagnose(session, spec, "setup", secrets)
         finally:
             if session:
                 try:
-                    await session.close()
-                except Exception:
-                    pass
+                    async with traced_step(13, "close page/context/browser"):
+                        await session.close()
+                except Exception as close_exc:
+                    logger.warning("error closing browser session: %s", close_exc)
         received = {normalize_pro(key, spec) for key in result.received}
         result.missing = [value for value in result.requested if normalize_pro(value, spec) not in received]
+
+        # Distinguish outcomes: found, not_found, missing, error
+        for pro in result.missing:
+            if pro not in result.outcomes:
+                if result.errors or result.failed_step:
+                    result.outcomes[pro] = "error"
+                    result.summaries[pro] = {
+                        "error_type": result.error_type or (result.errors[0]["type"] if result.errors else "Error"),
+                        "error_message": result.error_message or (result.errors[0]["message"] if result.errors else "scrape error"),
+                        "failed_step": result.failed_step or "scrape",
+                    }
+                else:
+                    result.outcomes[pro] = "missing"
+                    result.summaries[pro] = {"error_message": "no carrier JSON captured for PRO"}
+
         found_n = sum(1 for o in result.outcomes.values() if o == "found")
         not_found_n = sum(1 for o in result.outcomes.values() if o == "not_found")
         log(logger, logging.INFO, "batch scrape summary",
             captured=len(result.received), found=found_n, not_found=not_found_n,
-            missing=len(result.missing), errors=len(result.errors))
+            missing=len(result.missing), errors=len(result.errors),
+            first_error=result.first_error or "")
         return result
 
     async def _fill_tracking_input(self, session: BrowserSession, site, chunk: list[TrackingJob],
@@ -418,14 +510,44 @@ class BatchScraper:
                 f"(expected {len(expected_lines)} lines, got 1)"
             )
 
-    async def _open_and_login(self, session: BrowserSession, job: TrackingJob, spec: CarrierSpec) -> None:
+    async def _open_and_login(self, session: BrowserSession, job: TrackingJob, spec: CarrierSpec, secrets: list[str]) -> None:
         site, config = spec.site, job.carrier
         tracking_url = site.tracking_url or config.tracking_url
         if not tracking_url:
             raise ValueError("carrier tracking URL is missing")
-        await session.goto(tracking_url)
-        if await session.looks_blocked(spec.block_markers or None):
-            raise ChallengeError("carrier challenge detected")
+
+        async with traced_step(7, "navigate to tracking URL", extra={"requested_url": _safe_url(tracking_url, secrets)}) as step:
+            t0 = time.monotonic()
+            resp = await session.goto(tracking_url)
+            elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
+            final_url = _safe_url(session.current_url() or "", secrets)
+            page_title = ""
+            status_code = getattr(resp, "status", None) if resp else 200
+            try:
+                page_title = await session.page.title() if hasattr(session, "page") else ""
+            except Exception:
+                pass
+            step.set_info(
+                requested_url=_safe_url(tracking_url, secrets),
+                final_url=final_url,
+                http_status=status_code,
+                page_title=page_title,
+                elapsed_ms=elapsed_ms,
+            )
+
+            # Block page detection
+            page_text = ""
+            try:
+                if hasattr(session, "page"):
+                    page_text = (await session.page.inner_text("body"))[:2000]
+            except Exception:
+                pass
+            block_reason = check_block_page(page_text, final_url, status_code, page_title)
+            if block_reason:
+                logger.warning("block page detected after navigation: %s (url=%s, title=%s)", block_reason, final_url, page_title)
+            if await session.looks_blocked(spec.block_markers or None):
+                raise ChallengeError(f"carrier challenge detected: {block_reason or 'block marker match'}")
+
         await self._dismiss_consent(session, spec)
         await execute_login(session, spec, config.user_name, config.password, tracking_url)
         settle = float((spec.site.extra or {}).get("landing_settle_s", 2))
@@ -523,22 +645,29 @@ class BatchScraper:
         site = spec.site
         if await session.looks_blocked(spec.block_markers or None):
             raise ChallengeError("carrier challenge detected")
-        input_sel, submit_sel = await self._resolve_tracking_selectors(session, spec)
-        expected_text = await self._fill_tracking_input(session, site, chunk, spec, input_sel)
-        if not (site.extra or {}).get("skip_tracking_input_verify"):
-            await self._verify_tracking_input(session, input_sel, expected_text, chunk)
 
-        wait_ready = getattr(session, "wait_ready", None)
-        if wait_ready is not None and submit_sel:
-            try:
-                await wait_ready(submit_sel, timeout_s=min(20, site.response_timeout_s))
-            except Exception as exc:
-                logger.warning("submit control not ready before click: %s", type(exc).__name__)
-        if site.pre_submit_delay_s > 0:
-            await asyncio.sleep(site.pre_submit_delay_s)
-        else:
-            await self._delay(site.action_min_delay_s, site.action_max_delay_s)
-        await self._handle_recaptcha(session, spec)
+        async with traced_step(8, "wait for input/submit controls", extra={"input_selector": site.input_selector, "submit_selector": site.submit_selector, "timeout_s": 12}) as step8:
+            input_sel, submit_sel = await self._resolve_tracking_selectors(session, spec)
+            step8.set_info(resolved_input=input_sel, resolved_submit=submit_sel)
+
+        entered = [format_pro_for_input(job.search_value, spec) for job in chunk]
+        async with traced_step(9, "enter PROs", extra={"pro_count": len(chunk), "pros": [j.search_value for j in chunk], "entered_pros": entered}):
+            expected_text = await self._fill_tracking_input(session, site, chunk, spec, input_sel)
+            if not (site.extra or {}).get("skip_tracking_input_verify"):
+                await self._verify_tracking_input(session, input_sel, expected_text, chunk)
+
+        async with traced_step(10, "click submit", extra={"submit_selector": submit_sel}):
+            wait_ready = getattr(session, "wait_ready", None)
+            if wait_ready is not None and submit_sel:
+                try:
+                    await wait_ready(submit_sel, timeout_s=min(20, site.response_timeout_s))
+                except Exception as exc:
+                    logger.warning("submit control not ready before click: %s", type(exc).__name__)
+            if site.pre_submit_delay_s > 0:
+                await asyncio.sleep(site.pre_submit_delay_s)
+            else:
+                await self._delay(site.action_min_delay_s, site.action_max_delay_s)
+            await self._handle_recaptcha(session, spec)
 
         prefer_rx = re.compile(site.response_url_prefer) if site.response_url_prefer else None
 
@@ -555,8 +684,6 @@ class BatchScraper:
             if site.expected_response_shape == "single_batch":
                 if not matches:
                     return False
-                # Keep listening until the preferred (full-details) API arrives; capture_all
-                # still falls back to quiet/timeout so find-by-pro is used if details never fire.
                 if prefer_rx and not any(is_preferred(response) for response in matches):
                     return False
                 return True
@@ -576,55 +703,53 @@ class BatchScraper:
             else:
                 await click(submit_sel)
 
-        responses = await session.capture_all(_click_submit,
-            timeout_s=site.response_timeout_s, settle_s=site.idle_window_s,
-            until=complete)
-        matches = matching(responses)
-        if prefer_rx:
-            # Summary APIs first, preferred/full-details last so they overwrite per PRO
-            # without the details response marking the rest of the chunk as not_found.
-            matches = sorted(matches, key=lambda response: 1 if is_preferred(response) else 0)
-        if not matches and responses and (site.extra or {}).get("response_match_loose_json"):
-            for response in responses:
-                if self._pro_keys_from_response(response, spec, keys, site):
-                    matches.append(response)
-                elif isinstance(response.json, dict) and response.json.get("data") is not None:
-                    matches.append(response)
-                elif isinstance(response.json, list):
-                    matches.append(response)
-        if await session.looks_blocked(spec.block_markers or None):
-            raise ChallengeError("carrier challenge detected")
-        if not matches:
-            not_found = await self._carrier_not_found_message(session, spec)
-            if not_found:
-                log(logger, logging.WARNING, "carrier site reports tracking not found",
-                    pros=list(keys.values()), detail=not_found[:200])
-                return
-            log(logger, logging.WARNING, "no tracking JSON matched pattern",
-                pattern=site.response_url_pattern or site.response_regex,
-                captured_json_urls=[_response_url_without_query(response.url) for response in responses[:12]],
-                captured_count=len(responses))
-            log(logger, logging.INFO, "tracking response match diagnostics",
-                configured_pattern=site.response_url_pattern or site.response_regex,
-                response_count=len(responses), matched_count=len(matches),
-                sample_urls=[_response_url_without_query(response.url) for response in responses[:8]])
-            raise TimeoutError("no tracking JSON response matched the configured URL pattern")
-        log(logger, logging.INFO, "tracking API responses captured",
-            response_count=len(matches),
-            urls=[_response_url_without_query(response.url) for response in matches[:3]])
-        for response in matches:
-            if site.expected_response_shape == "single_batch":
-                if self._assign_single_batch_response(
-                    response, spec, keys, site, received, outcomes, summaries,
-                    allow_unmatched_not_found=not is_preferred(response)):
-                    continue
-            found = self._pro_keys_from_response(response, spec, keys, site)
-            if site.expected_response_shape == "single_batch" and not found:
-                found = set(keys) if len(keys) == 1 else set()
-            for normalized in found:
-                self._record_pro_response(keys[normalized], response.json, spec,
-                                          received, outcomes, summaries)
-        await self._collect_full_details(session, spec, keys, received, outcomes, summaries)
+        async with traced_step(11, "wait for API response", extra={"pattern": site.response_url_pattern or site.response_regex, "timeout_s": site.response_timeout_s}) as step11:
+            responses = await session.capture_all(
+                _click_submit,
+                timeout_s=site.response_timeout_s, settle_s=site.idle_window_s,
+                until=complete,
+            )
+            matches = matching(responses)
+            if prefer_rx:
+                matches = sorted(matches, key=lambda response: 1 if is_preferred(response) else 0)
+            if not matches and responses and (site.extra or {}).get("response_match_loose_json"):
+                for response in responses:
+                    if self._pro_keys_from_response(response, spec, keys, site):
+                        matches.append(response)
+                    elif isinstance(response.json, dict) and response.json.get("data") is not None:
+                        matches.append(response)
+                    elif isinstance(response.json, list):
+                        matches.append(response)
+            if await session.looks_blocked(spec.block_markers or None):
+                raise ChallengeError("carrier challenge detected")
+            if not matches:
+                not_found = await self._carrier_not_found_message(session, spec)
+                if not_found:
+                    log(logger, logging.WARNING, "carrier site reports tracking not found",
+                        pros=list(keys.values()), detail=not_found[:200])
+                    matches = []
+                else:
+                    log(logger, logging.WARNING, "no tracking JSON matched pattern",
+                        pattern=site.response_url_pattern or site.response_regex,
+                        captured_json_urls=[_response_url_without_query(response.url) for response in responses[:12]],
+                        captured_count=len(responses))
+                    raise TimeoutError("no tracking JSON response matched the configured URL pattern")
+            step11.set_info(matched_count=len(matches), total_responses=len(responses))
+
+        async with traced_step(12, "parse response JSON per PRO", extra={"matches": len(matches), "pros": list(keys.values())}):
+            for response in matches:
+                if site.expected_response_shape == "single_batch":
+                    if self._assign_single_batch_response(
+                        response, spec, keys, site, received, outcomes, summaries,
+                        allow_unmatched_not_found=not is_preferred(response)):
+                        continue
+                found = self._pro_keys_from_response(response, spec, keys, site)
+                if site.expected_response_shape == "single_batch" and not found:
+                    found = set(keys) if len(keys) == 1 else set()
+                for normalized in found:
+                    self._record_pro_response(keys[normalized], response.json, spec,
+                                              received, outcomes, summaries)
+            await self._collect_full_details(session, spec, keys, received, outcomes, summaries)
 
     async def _collect_full_details(self, session: BrowserSession, spec: CarrierSpec,
                                     keys: dict[str, str], received: dict[str, Any],

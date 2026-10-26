@@ -84,6 +84,17 @@ class ConsoleFormatter(logging.Formatter):
         return line
 
 
+class FlushFileHandler(logging.FileHandler):
+    """FileHandler that flushes after every record so crashes never lose trailing logs."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        try:
+            self.flush()
+        except Exception:
+            pass
+
+
 def setup_logging(level: str = "INFO", log_format: str = "console", logs_dir: str | Path = "logs") -> None:
     Path(logs_dir).mkdir(parents=True, exist_ok=True)
     h = logging.StreamHandler(sys.stdout)
@@ -93,6 +104,11 @@ def setup_logging(level: str = "INFO", log_format: str = "console", logs_dir: st
     root.handlers[:] = [h]
     root.setLevel(level)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    try:
+        from app.core.diagnostics import install_exception_hooks
+        install_exception_hooks(root)
+    except Exception:
+        pass
 
 
 @contextmanager
@@ -109,7 +125,7 @@ def run_file_logger(run_id: str | None = None, logs_dir: str | Path = "logs", le
     filename = f"run_{ts}_{rid}.log"
     log_file = p / filename
 
-    handler = logging.FileHandler(str(log_file), encoding="utf-8")
+    handler = FlushFileHandler(str(log_file), encoding="utf-8")
     handler.setFormatter(ConsoleFormatter())
     if level:
         handler.setLevel(level)
@@ -119,9 +135,26 @@ def run_file_logger(run_id: str | None = None, logs_dir: str | Path = "logs", le
     if root.level > logging.INFO:
         root.setLevel(logging.INFO)
     root.addHandler(handler)
+
+    try:
+        from app.core.diagnostics import install_exception_hooks, StderrTee
+        install_exception_hooks(root)
+        orig_stderr = sys.stderr
+        sys.stderr = StderrTee(orig_stderr, lambda msg: root.error("stderr | %s", msg))
+        stderr_redirected = True
+    except Exception:
+        orig_stderr = sys.stderr
+        stderr_redirected = False
+
     try:
         yield log_file
     finally:
+        if stderr_redirected:
+            try:
+                sys.stderr.flush()
+                sys.stderr = orig_stderr
+            except Exception:
+                pass
         try:
             handler.flush()
             root.removeHandler(handler)

@@ -28,8 +28,8 @@ async def build_jobs(backend) -> dict[str, dict[str, list[TrackingJob]]]:
         try:
             shipments = await backend.get_shipments(bill_to, carrier_code)
         except Exception as exc:
-            logger.warning("shipment intake failed", extra={"fields": {
-                "bill_to": bill_to, "carrier_code": carrier_code, "error": type(exc).__name__}})
+            logger.exception("shipment intake failed | bill_to=%s carrier_code=%s error=%s",
+                             bill_to, carrier_code, exc)
             continue
         search_by = config.search_by or "proNumber"
         seen: set[str] = set()

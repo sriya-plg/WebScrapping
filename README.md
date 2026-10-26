@@ -74,3 +74,43 @@ sanitized URL file under `debug_dir`.
 To add a carrier, create its client/carrier folder and mapping YAML, then fill in the
 clearly marked selector and response-pattern TODO values after observing the carrier
 page's browser network traffic. No core-code carrier-name branch is needed.
+
+## Diagnostics & Troubleshooting (Deployment & Standalone Tool)
+
+A standalone diagnostic tool is available to test the browser lifecycle (steps 1 to 7) without intake, PRO numbers, or TMS posting:
+
+```powershell
+# Run diagnostics for Forward Air:
+python -m app.tools.diagnose --carrier FORWARDAIR
+
+# Run diagnostics with headed browser to see the GUI:
+python -m app.tools.diagnose --carrier FORWARDAIR --headed
+
+# Run diagnostics for Saia with custom URL override:
+python -m app.tools.diagnose --carrier SAIA --url https://www.saia.com
+```
+
+### Running on Windows Server
+
+To run diagnostics under the exact same Windows service/task user account:
+
+1. **Interactive Run under Service Account**:
+   ```cmd
+   runas /user:DOMAIN\ServiceAccount "powershell -NoExit -Command cd C:\projects\WebScrapping; python -m app.tools.diagnose --carrier FORWARDAIR"
+   ```
+
+2. **Administrator-less Scheduled Task**:
+   If the job runs via Windows Task Scheduler without interactive login:
+   ```cmd
+   schtasks /create /tn "DiagnoseScraper" /tr "C:\projects\WebScrapping\.venv\Scripts\python.exe -m app.tools.diagnose --carrier FORWARDAIR" /sc once /st 12:00 /ru "DOMAIN\ServiceAccount" /rp "YourPassword"
+   schtasks /run /tn "DiagnoseScraper"
+   ```
+   Inspect results in `logs/diagnostics/diagnose_forwardair_<timestamp>.log`.
+
+### Diagnostic Environment Variables
+
+- `SCRAPER_DEBUG=1`: Enables detailed browser console, request failure reasons, page errors, responses >= 400, and enables `DEBUG=pw:api,pw:browser` driver logs. Default: `0`.
+- `SCRAPER_TRACE=1`: Captures full Playwright execution traces saved as `trace.zip` inside `logs/diagnostics/<run_id>/...`. View with `npx playwright show-trace trace.zip`. Default: `0`.
+- `POST_ERRORS_TO_TMS=true`: Controls whether scraper infrastructure failures are reported to TMS (`AddCarrierActivity`). Default: `false` (skips TMS post with warning).
+- `BROWSER_HEADLESS=true/false`: Global override for browser headless mode across all carriers. If unset, automatically defaults to `true` when running in headless environments (e.g. without DISPLAY on POSIX or non-interactive Windows services).
+

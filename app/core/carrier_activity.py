@@ -19,11 +19,14 @@ from app.settings import ActivityConfig, CarrierSpec
 
 logger = logging.getLogger(__name__)
 
+import os
+
 # Internal scrape outcomes (never send these as mlStatus unless mapped in client activity config).
 SCRAPE_OK = "ok"
 SCRAPE_NOT_FOUND = "not_found"
 SCRAPE_NO_RESPONSE = "no_response"
 SCRAPE_MAP_FAILED = "map_failed"
+SCRAPE_ERROR = "error"
 
 # Pegasus plgtst (2026-10): mlStatus 2, 3, 4 accepted; 0 and 1 return 400.
 
@@ -33,6 +36,8 @@ def pegasus_ml_status(spec: CarrierSpec, scrape_outcome: str) -> int:
     activity = spec.activity
     if scrape_outcome in activity.ml_status_by_outcome:
         return int(activity.ml_status_by_outcome[scrape_outcome])
+    if scrape_outcome == SCRAPE_ERROR:
+        return int(activity.ml_status_by_outcome.get("no_response", 3))
     return int(activity.ml_status_default)
 
 
@@ -332,13 +337,30 @@ async def post_scrape_activities(
         ml_log = "tracking scrape completed"
         ml_error = ""
 
-        if raw is None:
+        if outcome_type == "error":
+            post_errors = (
+                getattr(settings, "post_errors_to_tms", False)
+                or os.environ.get("POST_ERRORS_TO_TMS", "false").lower() in ("true", "1", "yes")
+            )
+            failed_step = summary.get("failed_step") or outcome.failed_step or "scrape"
+            err_type = summary.get("error_type") or outcome.error_type or "ScrapeError"
+            err_msg = summary.get("error_message") or outcome.error_message or "scrape error"
+
+            if not post_errors:
+                logger.warning(
+                    "skipping TMS post, scrape error | housebill=%s pro=%s error=%s failed_step=%s",
+                    job.shipment.housebill, job.search_value, err_type, failed_step,
+                )
+                stats["skipped"] += 1
+                continue
+
+            scrape_outcome = SCRAPE_ERROR
+            ml_log = f"outcome=error; failed at {failed_step}: {err_msg}"
+            ml_error = f"{err_type}: {err_msg} @{failed_step}"[:500]
+        elif raw is None:
             scrape_outcome = SCRAPE_NO_RESPONSE
             ml_log = f"outcome=missing; no carrier JSON captured for PRO {job.search_value}"
-            if any(e.get("pro") == job.search_value or job.search_value in (e.get("pros") or "")
-                   for e in outcome.errors):
-                ml_error = next((e.get("message", "") for e in outcome.errors
-                                 if e.get("pro") == job.search_value), "scrape error")
+            ml_error = summary.get("error_message") or "outcome=missing; carrier response returned no data for PRO"
         elif outcome_type == "not_found":
             scrape_outcome = SCRAPE_NOT_FOUND
             ml_log = summary.get("error_message") or "carrier reported shipment not found"

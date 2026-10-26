@@ -12,6 +12,11 @@ from app.core.job import AccountJob, CarrierGuard, RunContext, Services, label
 from app.core.metrics import RunMetrics
 from app.core.resilience import CircuitBreaker, Pacer, retry
 from app.core.batch_updates import enqueue_tracking_updates
+from app.core.diagnostics import log_environment_report, setup_asyncio_exception_handler
+from app.core.intake import build_jobs
+from app.core.job import AccountJob, CarrierGuard, RunContext, Services, label
+from app.core.metrics import RunMetrics
+from app.core.resilience import CircuitBreaker, Pacer, retry
 from app.core.scraper import BatchScraper
 from app.logging_setup import carrier_var, client_var, log, register_secret, run_file_logger, run_id_var
 from app.models import CarrierAccount
@@ -52,6 +57,14 @@ class Runner:
             logs_dir = getattr(self.sv.settings, "logs_dir", "logs")
             with run_file_logger(run_id=run_id, logs_dir=logs_dir) as log_file:
                 logger.info("run started | run_id=%s log_file=%s", run_id, log_file)
+                try:
+                    setup_asyncio_exception_handler(asyncio.get_running_loop(), logger)
+                except Exception:
+                    pass
+                try:
+                    log_environment_report(self.sv.settings, self.resolver, logger)
+                except Exception as env_exc:
+                    logger.warning("failed to log environment report: %s", env_exc)
                 try:
                     res = await self._run_once(only, force, only_clients)
                     logger.info("run finished | run_id=%s log_file=%s", run_id, log_file)
@@ -164,10 +177,12 @@ class Runner:
                     "activity_posted": activity_stats.get("posted", 0),
                     "activity_failed": activity_stats.get("failed", 0),
                 }
+                first_err = getattr(outcome, "first_error", None) or ""
                 log(logger, logging.INFO, "carrier batch complete", client=spec.client,
                     carrier_code=spec.code, bill_to=bill_to, requested=len(outcome.requested),
                     received=len(outcome.received), found=found_n, not_found=not_found_n,
-                    missing=len(outcome.missing), failures=len(outcome.errors))
+                    missing=len(outcome.missing), failures=len(outcome.errors),
+                    first_error=first_err)
             finally:
                 try:
                     await provider.close()
@@ -180,8 +195,8 @@ class Runner:
         for (bill_to, code), outcome in zip(groups, outcomes):
             if isinstance(outcome, BaseException):
                 summary[f"{bill_to}/{code}"] = {"failures": 1}
-                logger.error("carrier batch failed", extra={"fields": {"bill_to": bill_to,
-                             "carrier_code": code, "error": type(outcome).__name__}})
+                logger.error("carrier batch failed | bill_to=%s carrier_code=%s error=%s",
+                             bill_to, code, type(outcome).__name__, exc_info=outcome)
         log(logger, logging.INFO, "run complete", seconds=round(time.time() - started, 1),
             carriers_fetched=len(groups), jobs_built=sum(len(j) for j in groups.values()), summary=summary)
         return {**summary, "scrape_results": self.last_results}

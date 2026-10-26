@@ -257,6 +257,7 @@ class AppSettings(_Strict):
     schedule: ScheduleSettings = ScheduleSettings()
     alerts: AlertSettings = AlertSettings()
     dry_run: bool = False
+    post_errors_to_tms: bool = False
 
 
 def load_settings(path: str | Path = "config/app.yaml") -> AppSettings:

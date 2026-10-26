@@ -18,6 +18,7 @@ from app.browser.base import (
     BrowserSession,
     CapturedResponse,
 )
+from app.core.diagnostics import traced_step
 from app.settings import BrowserConfig
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,48 @@ logger = logging.getLogger(__name__)
 def _response_log_url(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
+
+def _attach_page_listeners(page: Any, context: Any = None) -> None:
+    scraper_debug = os.environ.get("SCRAPER_DEBUG", "0").lower() in ("1", "true", "yes")
+
+    def _on_console(msg):
+        if scraper_debug:
+            logger.debug("browser console [%s]: %s", msg.type, msg.text)
+        elif msg.type in ("error", "warning"):
+            logger.info("browser console [%s]: %s", msg.type, msg.text)
+
+    def _on_pageerror(err):
+        logger.warning("browser pageerror: %s", err)
+
+    def _on_requestfailed(req):
+        fail_text = req.failure or "unknown failure"
+        if scraper_debug:
+            logger.debug("browser request failed: %s | %s", _response_log_url(req.url), fail_text)
+
+    def _on_crash():
+        logger.error("browser page crashed")
+
+    def _on_response(resp):
+        if resp.status >= 400:
+            if scraper_debug:
+                logger.debug("browser response >= 400: status=%s url=%s", resp.status, _response_log_url(resp.url))
+            else:
+                logger.warning("browser response >= 400: status=%s url=%s", resp.status, _response_log_url(resp.url))
+
+    def _on_frame(frame):
+        if scraper_debug:
+            logger.debug("browser frame attached: %s", frame.url or "<about:blank>")
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_pageerror)
+    page.on("requestfailed", _on_requestfailed)
+    page.on("crash", _on_crash)
+    page.on("response", _on_response)
+    try:
+        page.on("frameattached", _on_frame)
+    except Exception:
+        pass
 
 
 async def _apply_stealth(context) -> None:
@@ -91,8 +134,9 @@ class _PWSession(BrowserSession):
         return self.page.locator(selector).first
 
     async def goto(self, url):
-        await self.page.goto(url, wait_until="domcontentloaded")
+        resp = await self.page.goto(url, wait_until="domcontentloaded")
         await asyncio.sleep(random.uniform(0.8, 2.2))
+        return resp
 
     async def fill(self, selector, value, human=True, frame=None):
         target = self._target(selector, frame).first
@@ -253,6 +297,14 @@ class _PWSession(BrowserSession):
             content_type_key = content_type.split(";", 1)[0] or "(missing)"
             content_type_counts[content_type_key] = content_type_counts.get(content_type_key, 0) + 1
 
+            request = getattr(resp, "request", None)
+            res_type = getattr(request, "resource_type", "") if request else ""
+            if res_type in ("xhr", "fetch") or "json" in content_type:
+                logger.info(
+                    "API response seen during wait: status=%s type=%s url=%s",
+                    resp.status, res_type or "xhr/fetch", safe_url,
+                )
+
             # We only want responses that are likely to contain JSON.
             is_json = (
                 "json" in content_type
@@ -363,7 +415,10 @@ class _PWSession(BrowserSession):
         except Exception:
             pass
         finally:
-            await self.context.close()
+            try:
+                await self.context.close()
+            except Exception as exc:
+                logger.warning("error closing browser context: %s", exc)
 
 
 class PlaywrightProvider(BrowserProvider):
@@ -374,39 +429,65 @@ class PlaywrightProvider(BrowserProvider):
     async def _start(self):
         if self._browser:
             return
-        if self.engine == "patchright":
-            from patchright.async_api import async_playwright
-        else:
-            from playwright.async_api import async_playwright
-        self._pw = await async_playwright().start()
 
-        headless = self.cfg.headless
-        env_headless = os.environ.get("BROWSER_HEADLESS") or os.environ.get("HEADLESS")
-        if env_headless is not None:
-            headless = env_headless.lower() in ("true", "1", "yes")
-        elif os.name == "posix" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-            headless = True
+        scraper_debug = os.environ.get("SCRAPER_DEBUG", "0").lower() in ("1", "true", "yes")
+        if scraper_debug:
+            os.environ.setdefault("DEBUG", "pw:api,pw:browser")
 
-        kw: dict[str, Any] = {"headless": headless}
-        if self.cfg.channel:
-            kw["channel"] = self.cfg.channel
-        if self.cfg.proxy:
-            kw["proxy"] = self.cfg.proxy
-        if self.engine == "playwright":
-            kw["args"] = ["--disable-blink-features=AutomationControlled"]
-        try:
-            self._browser = await self._pw.chromium.launch(**kw)
-        except Exception as exc:
-            if kw.get("channel"):
-                import logging
-                logging.getLogger(__name__).warning(
-                    "launching browser with channel=%r failed: %s; falling back to default chromium",
-                    kw["channel"], exc,
-                )
-                kw.pop("channel", None)
-                self._browser = await self._pw.chromium.launch(**kw)
-            else:
-                raise
+        if not self._pw:
+            async with traced_step(1, "start playwright driver", extra={"engine": self.engine}):
+                if self.engine == "patchright":
+                    from patchright.async_api import async_playwright
+                else:
+                    from playwright.async_api import async_playwright
+                self._pw = await async_playwright().start()
+
+        if not self._browser:
+            headless = self.cfg.headless
+            env_headless = os.environ.get("BROWSER_HEADLESS") or os.environ.get("HEADLESS")
+            if env_headless is not None:
+                headless = env_headless.lower() in ("true", "1", "yes")
+            elif os.name == "posix" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+                headless = True
+
+            kw: dict[str, Any] = {"headless": headless}
+            if self.cfg.channel:
+                kw["channel"] = self.cfg.channel
+            if self.cfg.proxy:
+                kw["proxy"] = self.cfg.proxy
+            if self.engine == "playwright":
+                kw["args"] = ["--disable-blink-features=AutomationControlled"]
+
+            exec_path = "unknown"
+            try:
+                exec_path = getattr(self._pw.chromium, "executable_path", "unknown")
+            except Exception:
+                pass
+
+            async with traced_step(2, "launch browser", extra={
+                "browser_type": "chromium",
+                "headless": headless,
+                "channel": self.cfg.channel or "default",
+                "executable_path": exec_path,
+                "args": kw.get("args", []),
+            }):
+                try:
+                    self._browser = await self._pw.chromium.launch(**kw)
+                except Exception as exc:
+                    if kw.get("channel"):
+                        logger.warning(
+                            "launching browser with channel=%r failed: %s; falling back to default chromium",
+                            kw["channel"], exc,
+                        )
+                        kw.pop("channel", None)
+                        self._browser = await self._pw.chromium.launch(**kw)
+                    else:
+                        raise
+                if self._browser:
+                    try:
+                        self._browser.on("disconnected", lambda: logger.warning("browser disconnected"))
+                    except Exception:
+                        pass
 
     async def open_session(self, key: str) -> BrowserSession:
         await self._start()
@@ -415,15 +496,40 @@ class PlaywrightProvider(BrowserProvider):
                                       viewport={"width": self.cfg.viewport_w, "height": self.cfg.viewport_h})
         if self.cfg.persist_state and state.exists():
             ctx_kw["storage_state"] = str(state)
-        context = await self._browser.new_context(**ctx_kw)
-        if self.stealth and self.engine == "playwright":
-            await _apply_stealth(context)
-        page = await context.new_page()
+
+        async with traced_step(3, "create context", extra={
+            "viewport": f"{self.cfg.viewport_w}x{self.cfg.viewport_h}",
+            "user_agent": "default",
+            "locale": self.cfg.locale,
+            "timezone": self.cfg.timezone_id,
+            "has_proxy": bool(self.cfg.proxy),
+        }):
+            context = await self._browser.new_context(**ctx_kw)
+            if os.environ.get("SCRAPER_TRACE", "0").lower() in ("1", "true", "yes"):
+                try:
+                    await context.tracing.start(screenshots=True, snapshots=True, sources=True)
+                except Exception as exc:
+                    logger.warning("could not start playwright tracing: %s", exc)
+
+        async with traced_step(4, "apply stealth / patches", extra={"stealth": self.stealth, "engine": self.engine}):
+            if self.stealth and self.engine == "playwright":
+                await _apply_stealth(context)
+
+        async with traced_step(5, "new page"):
+            page = await context.new_page()
+
+        async with traced_step(6, "attach listeners"):
+            _attach_page_listeners(page, context)
+
         return _PWSession(context, page, state if self.cfg.persist_state else None, self.cfg.nav_timeout_s)
 
     async def close(self):
-        if self._browser:
-            await self._browser.close()
-        if self._pw:
-            await self._pw.stop()
-        self._browser = self._pw = None
+        try:
+            if self._browser:
+                await self._browser.close()
+            if self._pw:
+                await self._pw.stop()
+        except Exception as exc:
+            logger.warning("error stopping playwright browser/driver: %s", exc)
+        finally:
+            self._browser = self._pw = None
