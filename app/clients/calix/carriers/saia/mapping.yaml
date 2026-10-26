@@ -68,7 +68,7 @@ site:
 
   response_timeout_s: 45
   idle_window_s: 2
-  typing_delay_ms: 200
+  typing_delay_ms: 250
   inter_pro_delay_s: 1.0
   pre_submit_delay_s: 2.5
   inter_batch_delay_s: 4.0
