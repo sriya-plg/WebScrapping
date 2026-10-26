@@ -58,6 +58,9 @@ site:
     batch_collect_all_responses: true
     single_batch_item_pro_path: proNumber|referenceNumbers.proNumber
     landing_settle_s: 2.5
+    consent_selectors:
+      - "#close-pc-btn-handler"
+      - 'button:has-text("Confirm My Choices")'
     # Open each PRO row to trigger the per-PRO full-details API (overwrites the list data).
     detail_response_pattern: '(?i)/api/v1/tracking/find-full-details'
     # TODO: adjust if the PRO row is not plain text; {pro_rx} matches the PRO with any separators.

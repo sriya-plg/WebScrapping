@@ -155,14 +155,13 @@ async def test_outcome_classified_as_missing_when_carrier_returns_nothing(tmp_pa
     from tests.test_batch_scraper import MockProvider, MockSession
 
     # Scrape succeeds for PRO1, but carrier genuinely returns nothing for PRO2
-    session = MockSession()
-    session.visible_selectors.add("#pro")
-    session.visible_selectors.add("#submit")
-    session.responses_by_input["PRO1\nPRO2"] = [
-        CapturedResponse("https://carrier.test/api/track", 200, [{"proNumber": "PRO1", "status": "In Transit"}])
-    ]
-    # For fallback retry of PRO2, carrier returns no response
-    session.responses_by_input["PRO2"] = []
+    responses = {
+        "PRO1\nPRO2": [
+            CapturedResponse("https://carrier.test/api/track", 200, [{"proNumber": "PRO1", "status": "In Transit"}])
+        ],
+        "PRO2": [],
+    }
+    session = MockSession(responses, visible_selectors={"#pro", "#submit"})
 
     spec = make_spec("single_batch", batch_size=2)
     spec.site.response_url_pattern = "/api/track"
