@@ -3,15 +3,29 @@ same API). Prefers capturing the JSON the page itself fetches over DOM scraping.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 import re
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
-from app.browser.base import DEFAULT_BLOCK_MARKERS, BrowserProvider, BrowserSession, CapturedResponse
+from app.browser.base import (
+    DEFAULT_BLOCK_MARKERS,
+    BrowserProvider,
+    BrowserSession,
+    CapturedResponse,
+)
 from app.settings import BrowserConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _response_log_url(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}{parts.path}"
 
 
 async def _apply_stealth(context) -> None:
@@ -220,11 +234,24 @@ class _PWSession(BrowserSession):
         found: list[CapturedResponse] = []
         tasks: list[asyncio.Task] = []
         last = [time.monotonic()]
+        capture_started = time.monotonic()
+        counts = {"responses": 0, "json_responses": 0, "json_parse_errors": 0}
+        status_counts: dict[int, int] = {}
+        content_type_counts: dict[str, int] = {}
+        sample_urls: list[str] = []
+        stop_reason = "timeout"
 
         async def handle(resp):
+            counts["responses"] += 1
+            status_counts[resp.status] = status_counts.get(resp.status, 0) + 1
+            safe_url = _response_log_url(resp.url)
+            if len(sample_urls) < 8 and safe_url not in sample_urls:
+                sample_urls.append(safe_url)
             content_type = (
                 resp.headers.get("content-type") or ""
             ).lower()
+            content_type_key = content_type.split(";", 1)[0] or "(missing)"
+            content_type_counts[content_type_key] = content_type_counts.get(content_type_key, 0) + 1
 
             # We only want responses that are likely to contain JSON.
             is_json = (
@@ -235,9 +262,11 @@ class _PWSession(BrowserSession):
             if not is_json:
                 return
 
+            counts["json_responses"] += 1
             try:
                 data = await resp.json()
             except Exception:
+                counts["json_parse_errors"] += 1
                 return
 
             found.append(
@@ -272,14 +301,20 @@ class _PWSession(BrowserSession):
 
                 if until and until(found):
                     await asyncio.sleep(settle_s)
+                    stop_reason = "condition_met"
                     break
                 if until is not None and found and quiet:
+                    stop_reason = "idle_after_response"
                     break
 
                 if until is None and found and quiet:
+                    stop_reason = "idle_after_response"
                     break
 
 
+        except Exception as exc:
+            stop_reason = f"action_error:{type(exc).__name__}"
+            raise
         finally:
             self.page.remove_listener(
                 "response",
@@ -289,6 +324,14 @@ class _PWSession(BrowserSession):
             await asyncio.gather(
                 *tasks,
                 return_exceptions=True,
+            )
+            logger.info(
+                "browser response capture summary duration_s=%.2f stop_reason=%s "
+                "responses=%s json_responses=%s json_parse_errors=%s statuses=%s "
+                "content_types=%s sample_urls=%s",
+                time.monotonic() - capture_started, stop_reason,
+                counts["responses"], counts["json_responses"], counts["json_parse_errors"],
+                status_counts, content_type_counts, sample_urls,
             )
 
         return found

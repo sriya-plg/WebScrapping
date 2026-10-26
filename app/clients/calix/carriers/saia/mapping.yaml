@@ -95,7 +95,6 @@ mapping:
     destination: "consignee.name|consignee.companyName|consignee.city|consignee.address.city"
     pieces: "shipmentInformation.totalPieces|shipment.pieces"
     weight: "shipmentInformation.totalWeight|shipment.weight"
-    service_level: "shipmentInformation.type|shipment.serviceLevel|shipment.service"
     pod_name: "deliveryInformation.signature|delivery.signedBy|delivery.podName|delivery.signature"
     pod_datetime: "deliveryInformation.deliveryDate|delivery.deliveredDate|delivery.podDateTime"
   compose:

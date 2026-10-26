@@ -14,9 +14,9 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 from app.browser.base import BrowserProvider, BrowserSession, CapturedResponse
 from app.core.adapter import DEFAULT_CONSENT_SELECTORS, session_key
 from app.core.login import execute_login
+from app.core.mapper import get_path
 from app.logging_setup import carrier_var, client_var, log
 from app.models import TrackingJob
-from app.core.mapper import get_path
 from app.settings import CarrierSpec
 
 logger = logging.getLogger(__name__)
@@ -201,6 +201,11 @@ def _safe_url(url: str, secrets: list[str]) -> str:
     return safe
 
 
+def _response_url_without_query(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
 class BatchScraper:
     def __init__(self, provider: BrowserProvider, spec: CarrierSpec | None = None,
                  debug_dir: str = "state/debug"):
@@ -234,6 +239,10 @@ class BatchScraper:
         secrets = [value for value in (config.user_name,
                     config.password.get_secret_value() if config.password else None) if value]
         try:
+            log(logger, logging.INFO, "browser session opening",
+                engine=spec.browser.browser_mode or spec.browser.provider,
+                headless=spec.browser.headless, channel=spec.browser.channel or "bundled chromium",
+                tracking_url=_safe_url(site.tracking_url or config.tracking_url or "", secrets))
             client_var.set(spec.client)
             carrier_var.set(spec.code)
             session = await self.provider.open_session(session_key(spec))
@@ -241,6 +250,8 @@ class BatchScraper:
                 job_count=len(jobs), batch_size=spec.site.batch_size)
             await self._open_and_login(session, jobs[0], spec)
             site = spec.site
+            log(logger, logging.INFO, "tracking page ready",
+                page_url=_safe_url(session.current_url() or "", secrets), job_count=len(jobs))
             pattern = re.compile(site.response_url_pattern or site.response_regex or ".*")
             for chunk_index, chunk in enumerate(_chunks(jobs, site.batch_size)):
                 if chunk_index:
@@ -261,6 +272,9 @@ class BatchScraper:
                         exc = ChallengeError("carrier challenge detected")
                     log(logger, logging.WARNING, "tracking batch failed", stage="chunk",
                         error=type(exc).__name__, detail=self._safe_error(exc, secrets))
+                    log(logger, logging.INFO, "scrape failure details", stage="chunk",
+                        error=type(exc).__name__, detail=self._safe_error(exc, secrets),
+                        pro_count=len(chunk))
                     result.errors.append({"type": type(exc).__name__, "pros": ",".join(
                         job.search_value for job in chunk), "message": self._safe_error(exc, secrets)})
                     await self._diagnose(session, spec, "chunk", secrets)
@@ -283,6 +297,8 @@ class BatchScraper:
                             log(logger, logging.WARNING, "tracking batch failed", stage="fallback",
                                 pro=job.search_value, error=type(exc).__name__,
                                 detail=self._safe_error(exc, secrets))
+                            log(logger, logging.INFO, "scrape failure details", stage="fallback",
+                                error=type(exc).__name__, detail=self._safe_error(exc, secrets))
                             result.errors.append({"type": type(exc).__name__, "pro": job.search_value,
                                                   "message": self._safe_error(exc, secrets)})
                             await self._diagnose(session, spec, "fallback", secrets)
@@ -300,6 +316,8 @@ class BatchScraper:
             log(logger, logging.ERROR, "batch scrape setup failed",
                 client=spec.client, carrier_code=spec.code,
                 error=type(exc).__name__, message=safe_msg)
+            log(logger, logging.INFO, "scrape failure details", stage="setup",
+                error=type(exc).__name__, detail=safe_msg)
             logger.exception("batch scrape setup failed for %s/%s: %s", spec.client, spec.code, safe_msg)
             result.errors.append({
                 "type": type(exc).__name__,
@@ -584,11 +602,16 @@ class BatchScraper:
                 return
             log(logger, logging.WARNING, "no tracking JSON matched pattern",
                 pattern=site.response_url_pattern or site.response_regex,
-                captured_json_urls=[response.url for response in responses[:12]],
+                captured_json_urls=[_response_url_without_query(response.url) for response in responses[:12]],
                 captured_count=len(responses))
+            log(logger, logging.INFO, "tracking response match diagnostics",
+                configured_pattern=site.response_url_pattern or site.response_regex,
+                response_count=len(responses), matched_count=len(matches),
+                sample_urls=[_response_url_without_query(response.url) for response in responses[:8]])
             raise TimeoutError("no tracking JSON response matched the configured URL pattern")
         log(logger, logging.INFO, "tracking API responses captured",
-            response_count=len(matches), urls=[response.url for response in matches[:3]])
+            response_count=len(matches),
+            urls=[_response_url_without_query(response.url) for response in matches[:3]])
         for response in matches:
             if site.expected_response_shape == "single_batch":
                 if self._assign_single_batch_response(
