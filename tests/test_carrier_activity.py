@@ -43,7 +43,7 @@ def test_event_code_is_capped_at_50_characters():
     )
     start = datetime(2026, 10, 11, 7, 22, 20, tzinfo=timezone.utc)
     payload = build_add_carrier_activity(
-        job, result, outcome="found", summary={}, ml_start=start, ml_end=start, ml_status=2, ml_log="ok",
+        job, result, outcome="found", summary={}, ml_start=start, ml_end=start, ml_status=3, ml_log="ok",
     )
     assert len(payload["events"][0]["code"]) == 50
     assert payload["events"][0]["code"] == long_status[:50]
@@ -69,7 +69,7 @@ def test_build_add_carrier_activity_shape():
     end = datetime(2026, 10, 11, 7, 22, 25, tzinfo=timezone.utc)
     payload = build_add_carrier_activity(
         job, result, outcome="found", summary={}, ml_start=start, ml_end=end,
-        ml_status=2, ml_log="ok",
+        ml_status=3, ml_log="ok",
     )
     assert payload["housebill"] == "HB123"
     assert payload["mlEndDateTime"] == "2026-10-11T07:22:25Z"
@@ -77,7 +77,7 @@ def test_build_add_carrier_activity_shape():
     assert payload["proNumber"] == "771043317403"
     assert payload["carrierCode"] == "SAI001"
     assert payload["billTo"] == 134034
-    assert payload["mlStatus"] == 2
+    assert payload["mlStatus"] == 3
     assert len(payload["events"]) == 1
     assert payload["events"][0]["description"] == "Delivered"
 
@@ -112,8 +112,8 @@ def test_post_scrape_activities_one_per_housebill():
     assert stats["posted"] == 2
     assert len(backend.payloads) == 2
     by_hb = {p["housebill"]: p for p in backend.payloads}
-    assert by_hb["H1"]["mlStatus"] == 2
-    assert by_hb["H2"]["mlStatus"] == 3
+    assert by_hb["H1"]["mlStatus"] == 3
+    assert by_hb["H2"]["mlStatus"] == 4
     assert "missing" in by_hb["H2"]["mlLog"]
 
 
@@ -144,9 +144,12 @@ def test_post_logs_scrape_capture_and_tms_payload(caplog):
 
 def test_pegasus_ml_status_maps_outcomes():
     spec = make_spec("single_batch", batch_size=1)
-    assert pegasus_ml_status(spec, "ok") == 2
+    assert pegasus_ml_status(spec, "ok") == 3
     assert pegasus_ml_status(spec, "not_found") == 4
-    assert pegasus_ml_status(spec, "no_response") == 3
+    assert pegasus_ml_status(spec, "no_response") == 4
+    assert pegasus_ml_status(spec, "map_failed") == 4
+    assert pegasus_ml_status(spec, "error") == 4
+    assert pegasus_ml_status(spec, "unexpected_outcome") == 4
 
 
 def test_bill_to_not_overwritten_by_tracking_result():
@@ -161,7 +164,7 @@ def test_bill_to_not_overwritten_by_tracking_result():
     start = datetime.now(timezone.utc)
     payload = build_add_carrier_activity(
         job, result, outcome="found", summary={}, ml_start=start, ml_end=start,
-        ml_status=2, ml_log="ok",
+        ml_status=3, ml_log="ok",
     )
     assert payload["billTo"] == 134034
     assert payload["carrierCode"] == "SAI001"

@@ -9,13 +9,14 @@ defaults:
     search_by_path: searchBy     # first response tells us PRO / BOL / ...
     search_by_default: PRO
   activity:
-    # plgtst: mlStatus 0/1 -> 400 "ML status id is not valid"; 2-4 pass validation (confirm with API team).
-    ml_status_default: 2
+    # 2 = processing, 3 = successfully scraped, 4 = failed/not found.
+    ml_status_default: 4
     ml_status_by_outcome:
-      ok: 2
+      ok: 3
       not_found: 4
-      no_response: 3
-      map_failed: 3
+      no_response: 4
+      map_failed: 4
+      error: 4
     # TrackingResult + ctx -> AddCarrierActivity. Paths are dotted (`a.b`) or `=literal`.
     # Override a key here for all Calix carriers, or in a carrier mapping.yaml under activity:.
     payload_map:

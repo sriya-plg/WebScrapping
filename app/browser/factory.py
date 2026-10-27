@@ -15,4 +15,7 @@ def make_provider(cfg: BrowserConfig, state_dir: str) -> BrowserProvider:
     if mode == "crawl4ai":
         from app.browser.crawl4ai_provider import Crawl4AIProvider
         return Crawl4AIProvider(cfg, state_dir)
+    if mode == "browser_use":
+        from app.browser.browser_use_provider import BrowserUseProvider
+        return BrowserUseProvider(cfg, state_dir)
     raise ValueError(f"unknown browser provider {mode!r}")

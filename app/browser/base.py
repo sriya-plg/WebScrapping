@@ -17,6 +17,8 @@ class CapturedResponse:
 
 
 class BrowserSession(ABC):
+    cdp_url: str | None = None
+
     @abstractmethod
     async def goto(self, url: str) -> None: ...
     @abstractmethod

@@ -124,8 +124,9 @@ _DISCOVER_JS = r"""() => {
 
 
 class _PWSession(BrowserSession):
-    def __init__(self, context, page, state_path: Path | None, nav_timeout_s: float):
+    def __init__(self, context, page, state_path: Path | None, nav_timeout_s: float, cdp_url: str | None = None):
         self.context, self.page, self.state_path = context, page, state_path
+        self.cdp_url = cdp_url
         page.set_default_timeout(nav_timeout_s * 1000)
 
     def _target(self, selector: str, frame: str | None = None):
@@ -455,8 +456,14 @@ class PlaywrightProvider(BrowserProvider):
                 kw["channel"] = self.cfg.channel
             if self.cfg.proxy:
                 kw["proxy"] = self.cfg.proxy
+            args = []
             if self.engine == "playwright":
-                kw["args"] = ["--disable-blink-features=AutomationControlled"]
+                args.append("--disable-blink-features=AutomationControlled")
+            cdp_port = int(os.environ.get("REMOTE_DEBUGGING_PORT", "9222"))
+            if not any(a.startswith("--remote-debugging-port") for a in args):
+                args.append(f"--remote-debugging-port={cdp_port}")
+            kw["args"] = args
+            self.cdp_url = f"http://127.0.0.1:{cdp_port}"
 
             exec_path = "unknown"
             try:
@@ -521,7 +528,13 @@ class PlaywrightProvider(BrowserProvider):
         async with traced_step(6, "attach listeners"):
             _attach_page_listeners(page, context)
 
-        return _PWSession(context, page, state if self.cfg.persist_state else None, self.cfg.nav_timeout_s)
+        return _PWSession(
+            context,
+            page,
+            state if self.cfg.persist_state else None,
+            self.cfg.nav_timeout_s,
+            cdp_url=getattr(self, "cdp_url", None),
+        )
 
     async def close(self):
         try:

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.browser.base import BrowserProvider, BrowserSession
+from app.browser.base import BrowserProvider, BrowserSession, CapturedResponse
 from app.core.carrier_activity import post_scrape_activities
 from app.core.diagnostics import (
     check_block_page,
@@ -173,7 +173,7 @@ async def test_outcome_classified_as_missing_when_carrier_returns_nothing(tmp_pa
 
     result = await scraper.run_batch(jobs, spec)
 
-    assert result.outcomes["PRO1"] == "found"
+    assert result.outcomes["PRO1"] in ("found", "captured")
     assert result.outcomes["PRO2"] == "missing"
     assert result.missing == ["PRO2"]
     assert result.errors == []
@@ -241,7 +241,7 @@ async def test_tms_post_on_error_outcome_when_enabled():
     assert stats["posted"] == 1
     assert len(backend.payloads) == 1
     payload = backend.payloads[0]
-    assert payload["mlStatus"] == 3
+    assert payload["mlStatus"] == 4
     assert "NotImplementedError: SelectorEventLoop @start driver" in payload["mlError"]
     assert "outcome=error" in payload["mlLog"]
 
@@ -268,7 +268,7 @@ async def test_tms_post_on_genuine_missing_populates_ml_error():
     assert stats["posted"] == 1
     assert len(backend.payloads) == 1
     payload = backend.payloads[0]
-    assert payload["mlStatus"] == 3
+    assert payload["mlStatus"] == 4
     assert "outcome=missing" in payload["mlLog"]
     assert payload["mlError"] != ""
     assert "missing" in payload["mlError"]

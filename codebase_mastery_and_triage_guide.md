@@ -112,7 +112,7 @@ WebScrapping/
 - `enqueue_tracking_updates()` receives the raw scrape outcome.
 - For each PRO:
   - If found: calls `normalize(raw, spec)` to extract standard fields (status, pickup date, delivery date, ETA, history events).
-  - Determines Pegasus status ID via `pegasus_ml_status()` (e.g., 2 for ok, 4 for not_found, 3 for error).
+  - Determines Pegasus status ID via `pegasus_ml_status()` (e.g., 3 for ok, 4 for not_found, 2 for error).
   - Formats payload via `build_carrier_activity_payload()`.
   - Sends HTTP POST request to Pegasus endpoint `backend.carrier_activity_path` (or saves to `out/AddCarrierActivity/` in dry-run/file mode).
 
@@ -130,7 +130,7 @@ When an error or alert happens, use this table to jump straight to the source fi
 | **Backend / TMS Auth Failed** | `BackendAuthError: 401 Unauthorized` | `.env` (`TRACKER_API_TOKEN`), `config/app.yaml` (`auth_header`, `auth_scheme`) | The Pegasus API token is expired or missing. Check `.env` and verify credentials against the backend API docs. |
 | **Data Mapping / Normalization Bug** | Status is `unknown`, ETA is null, or events missing in TMS | `app/core/mapper.py` & `app/clients/<client>/carriers/<carrier>/mapping.yaml` (`fields`, `status_map`) | The raw JSON structure changed. Check `fields` in `mapping.yaml`. Ensure `dotted.path` matches the new JSON structure. Add missing carrier status strings to `status_map`. |
 | **Rate Limit / Circuit Breaker Tripped** | `Circuit breaker open for <carrier>` | `app/clients/<client>/carriers/<carrier>/mapping.yaml` (`limits: breaker_threshold, breaker_cooldown_s`) | The carrier is blocking requests due to rapid scraping. Adjust `limits.min_delay_s`, `limits.max_delay_s`, or reduce `batch_size`. Reset breaker in `state/tracker.db` if needed. |
-| **Pegasus AddCarrierActivity 400 Bad Request** | `400 Client Error: ML status id is not valid` | `app/core/carrier_activity.py` & `app/clients/<client>/client.yaml` (`defaults.activity.ml_status_by_outcome`) | Pegasus requires specific numeric `mlStatus` values (e.g. 2=OK, 3=Error, 4=Not Found). Do not send 0 or 1. Update `client.yaml` under `activity`. |
+| **Pegasus AddCarrierActivity 400 Bad Request** | `400 Client Error: ML status id is not valid` | `app/core/carrier_activity.py` & `app/clients/<client>/client.yaml` (`defaults.activity.ml_status_by_outcome`) | Pegasus requires specific numeric `mlStatus` values (e.g. 3=OK, 2=Error, 4=Not Found). Do not send 0 or 1. Update `client.yaml` under `activity`. |
 | **Missing Carrier Configuration** | Log: `carrier not configured for this client` | `app/clients/<client>/carriers/` | The backend returned a carrier code that doesn't have a folder under `app/clients/<client>/carriers/`. Run `python scripts/new_carrier.py <client> <carrier_code> "<Name>"` to generate it. |
 
 ---
@@ -203,7 +203,7 @@ Defined in [app/core/carrier_activity.py](file:///c:/Users/UshaKiranAlluri/Docum
 - `housebill`: Client's internal housebill identifier
 - `carrierCode`: Code assigned to carrier (e.g., `EXLA`, `SAIA`)
 - `billTo`: Client billing account number (e.g., `134034`)
-- `mlStatus`: Numeric ML status identifier (2 = success, 4 = not found, 3 = error)
+- `mlStatus`: Numeric ML status identifier (3 = success, 4 = not found, 2 = error)
 - `activityDate`: UTC timestamp `yyyy-mm-ddTHH:MM:SSZ`
 - `comments`: Scrape summary / status description
 - `createdBy`: System actor ID (defaults to 1)

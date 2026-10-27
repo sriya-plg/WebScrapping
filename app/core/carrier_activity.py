@@ -36,9 +36,7 @@ def pegasus_ml_status(spec: CarrierSpec, scrape_outcome: str) -> int:
     activity = spec.activity
     if scrape_outcome in activity.ml_status_by_outcome:
         return int(activity.ml_status_by_outcome[scrape_outcome])
-    if scrape_outcome == SCRAPE_ERROR:
-        return int(activity.ml_status_by_outcome.get("no_response", 3))
-    return int(activity.ml_status_default)
+    return int(activity.ml_status_by_outcome.get("error", activity.ml_status_default))
 
 
 def account_from_config(config: CarrierConfig) -> CarrierAccount:

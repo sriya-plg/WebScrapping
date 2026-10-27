@@ -35,8 +35,8 @@ class _Strict(BaseModel):
 
 
 class BrowserConfig(_Strict):
-    provider: Literal["playwright_stealth", "patchright", "crawl4ai"] = "playwright_stealth"
-    browser_mode: Literal["playwright_stealth", "patchright"] | None = None
+    provider: Literal["playwright_stealth", "patchright", "crawl4ai", "browser_use"] = "playwright_stealth"
+    browser_mode: Literal["playwright_stealth", "patchright", "browser_use"] | None = None
     headless: bool = True
     channel: str | None = None          # e.g. "chrome" (recommended with patchright)
     locale: str = "en-US"
@@ -144,17 +144,18 @@ def _default_activity_events_map() -> dict[str, str]:
 
 
 class ActivityConfig(_Strict):
-    """AddCarrierActivity: mlStatus must be a valid Pegasus ML status id (plgtst accepts 2-4; 0/1 rejected).
+    """AddCarrierActivity: 2=processing, 3=successful scrape, 4=failed/not found.
 
     payload_map / events_map are the client-level YAML that turns TrackingResult + ctx
     into the backend body. Override in client.yaml (all carriers) or a carrier mapping.yaml.
     """
-    ml_status_default: int = 2
+    ml_status_default: int = 4
     ml_status_by_outcome: dict[str, int] = Field(default_factory=lambda: {
-        "ok": 2,
+        "ok": 3,
         "not_found": 4,
-        "no_response": 3,
-        "map_failed": 3,
+        "no_response": 4,
+        "map_failed": 4,
+        "error": 4,
     })
     payload_map: dict[str, str] = Field(default_factory=_default_activity_payload_map)
     events_map: dict[str, str] = Field(default_factory=_default_activity_events_map)

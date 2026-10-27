@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -992,10 +993,73 @@ class BatchScraper:
                     return false;
                 }"""))
                 if challenge:
-                    raise ChallengeError("reCAPTCHA image challenge presented (manual intervention required)")
+                    use_browser_use = (
+                        os.environ.get("USE_BROWSER_USE_CAPTCHA", "").lower() in ("1", "true", "yes")
+                        or bool((spec.site.extra or {}).get("use_browser_use_captcha"))
+                        or spec.browser.provider == "browser_use"
+                    )
+                    if use_browser_use:
+                        try:
+                            from app.browser.browser_use_captcha import solve_captcha_with_browser_use
+                            bu_timeout = float((spec.site.extra or {}).get("browser_use_timeout_s", 60.0))
+                            logger.info("reCAPTCHA challenge detected; delegating resolution to Browser Use on active Playwright page...")
+                            resolved = await solve_captcha_with_browser_use(session, spec, timeout_s=bu_timeout)
+                            if resolved:
+                                logger.info(
+                                    "reCAPTCHA challenge resolved by Browser Use for %s; saving session state and resuming Playwright workflow",
+                                    spec.code
+                                )
+                                await session.save_state()
+                                await asyncio.sleep(0.5)
+                                return
+                        except Exception as bu_exc:
+                            logger.warning("Browser Use CAPTCHA attempt failed: %s; falling back to assist mode", bu_exc)
+
+                    is_headed = not spec.browser.headless or os.environ.get("BROWSER_HEADLESS", "").lower() in ("0", "false")
+                    assist_mode = is_headed or os.environ.get("SCRAPER_ASSIST", "").lower() in ("1", "true", "yes") or bool((spec.site.extra or {}).get("interactive_challenge_assist"))
+                    if assist_mode:
+                        assist_timeout = float((spec.site.extra or {}).get("challenge_assist_wait_s", spec.site.challenge_wait_s or 60.0))
+                        logger.info(
+                            "reCAPTCHA challenge presented for %s; waiting up to %.1fs for human-assisted verification in browser...",
+                            spec.code, assist_timeout
+                        )
+                        assist_deadline = asyncio.get_running_loop().time() + assist_timeout
+                        while asyncio.get_running_loop().time() < assist_deadline:
+                            await asyncio.sleep(0.5)
+                            verified = False
+                            if page is not None:
+                                try:
+                                    verified = await page.frame_locator(anchor_frame).locator(checked_selector).is_visible()
+                                except Exception:
+                                    pass
+                            elif await session.is_visible(checked_selector, frame=anchor_frame):
+                                verified = True
+                            if not verified:
+                                token = await session.evaluate("""() => {
+                                    const el = document.querySelector('#g-recaptcha-response') || document.querySelector('#g-recaptcha-response-1');
+                                    return el && el.value ? el.value : '';
+                                }""")
+                                verified = bool(token)
+                            if verified:
+                                logger.info(
+                                    "reCAPTCHA challenge successfully resolved via human assistance for %s; saving session state and resuming batch",
+                                    spec.code
+                                )
+                                await session.save_state()
+                                await asyncio.sleep(0.5)
+                                return
+
+                        err = ChallengeError("reCAPTCHA image challenge timed out waiting for human intervention")
+                        setattr(err, "failed_step", "recaptcha_challenge")
+                        raise err
+
+                    err = ChallengeError("reCAPTCHA image challenge presented (manual intervention required)")
+                    setattr(err, "failed_step", "recaptcha_challenge")
+                    raise err
             except ChallengeError:
                 raise
-            except Exception:
+            except Exception as loop_exc:
+                logger.debug("reCAPTCHA poll exception: %s", loop_exc)
                 pass
 
     @staticmethod

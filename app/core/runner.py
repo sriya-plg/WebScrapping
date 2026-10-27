@@ -183,6 +183,22 @@ class Runner:
                     received=len(outcome.received), found=found_n, not_found=not_found_n,
                     missing=len(outcome.missing), failures=len(outcome.errors),
                     first_error=first_err)
+
+                if getattr(self.sv, "queue", None) and (
+                    outcome.error_type == "ChallengeError"
+                    or any(err.get("type") == "ChallengeError" for err in outcome.errors)
+                ):
+                    blocked_refs = [j.search_value for j in jobs if outcome.outcomes.get(j.search_value) == "error"] or outcome.requested
+                    reason = outcome.error_message or "reCAPTCHA challenge presented (manual intervention required)"
+                    await self.sv.queue.raise_(
+                        run_id_var.get() or "",
+                        spec.client,
+                        spec.code,
+                        str(bill_to),
+                        blocked_refs,
+                        reason,
+                        spec.site.tracking_url or config.tracking_url,
+                    )
             finally:
                 try:
                     await provider.close()

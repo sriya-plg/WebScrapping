@@ -79,7 +79,7 @@ def test_full_details_become_add_carrier_activity_payload():
     result = normalize(SAIA, FULL, "77137570910", "PRO", ACCT)
     payload = build_add_carrier_activity(
         _job("HB123", "77137570910"), result, outcome="found", summary={},
-        ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=SAIA,
+        ml_start=START, ml_end=END, ml_status=3, ml_log="ok", spec=SAIA,
     )
     assert payload["housebill"] == "HB123"
     assert payload["proNumber"] == "77137570910"
@@ -88,7 +88,7 @@ def test_full_details_become_add_carrier_activity_payload():
     assert payload["serviceLevel"] == "PPD"
     assert payload["podName"] == "Received by-Shawn"
     assert payload["podDateTime"] == "2026-09-15T12:13:00Z"
-    assert payload["mlStatus"] == 2
+    assert payload["mlStatus"] == 3
     assert payload["mlStartDateTime"] == "2026-10-11T07:22:20Z"
     assert len(payload["events"]) == 3
     ev = payload["events"][0]
@@ -106,7 +106,7 @@ def test_yaml_payload_map_override_is_respected():
     result = normalize(spec, FULL, "77137570910", "PRO", ACCT)
     payload = build_add_carrier_activity(
         _job("HB123", "77137570910"), result, outcome="found", summary={},
-        ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=spec,
+        ml_start=START, ml_end=END, ml_status=3, ml_log="ok", spec=spec,
     )
     assert payload["serviceLevel"] == "STD"
 
@@ -119,7 +119,7 @@ def test_extra_mapping_field_flows_into_payload_without_model_change():
     assert result.driver == "Received by-Shawn"
     payload = build_add_carrier_activity(
         _job("HB123", "77137570910"), result, outcome="found", summary={},
-        ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=spec,
+        ml_start=START, ml_end=END, ml_status=3, ml_log="ok", spec=spec,
     )
     assert payload["reference"] == "Received by-Shawn"
 
@@ -272,7 +272,7 @@ def test_estes_movement_history_maps_to_add_carrier_activity():
 
     payload = build_add_carrier_activity(
         _estes_job(), result, outcome="found", summary={},
-        ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=ESTES,
+        ml_start=START, ml_end=END, ml_status=3, ml_log="ok", spec=ESTES,
     )
     assert payload["proNumber"] == "184-8684463"
     assert payload["carrierCode"] == "ESTE03"
@@ -350,7 +350,7 @@ def test_estes_status_history_adds_movement_events_and_preserves_offsets():
 
     payload = build_add_carrier_activity(
         _estes_job(pro="1848683493"), result, outcome="found", summary={},
-        ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=ESTES,
+        ml_start=START, ml_end=END, ml_status=3, ml_log="ok", spec=ESTES,
     )
     assert payload["events"][0]["eventDateTime"] == "2026-09-04T13:46:52-06:00"
     assert payload["events"][0]["timezone"] == "-06:00"
@@ -421,7 +421,7 @@ def test_forwardair_sample_maps_pod_and_status_rows():
 
     payload = build_add_carrier_activity(
         _forwardair_job(), result, outcome="found", summary={},
-        ml_start=START, ml_end=END, ml_status=2, ml_log="ok", spec=FORWARDAIR,
+        ml_start=START, ml_end=END, ml_status=3, ml_log="ok", spec=FORWARDAIR,
     )
     assert payload["housebill"] == "23600001"
     assert payload["proNumber"] == "96765557"
