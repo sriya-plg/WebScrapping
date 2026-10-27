@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from app.backend.client import FileBackend
 from app.core import registry
 from app.core.intervention import InterventionQueue
 from app.core.mapper import build_payload, get_path
@@ -13,7 +14,6 @@ from app.core.scheduler import JitterSchedule
 from app.core.state import StateStore
 from app.models import CarrierAccount
 from app.settings import AlertSettings, AppSettings, load_resolver
-from app.backend.client import FileBackend
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RES = load_resolver(ROOT / "app/clients")
@@ -29,6 +29,92 @@ def test_jitter_bounds_restart_safe_and_no_drift():
     assert min(gaps) >= 6 * 3600 - 50 * 60 and max(gaps) <= 6 * 3600 + 50 * 60 and len(set(gaps)) > 100
     now = 123456.0
     assert s.next_after(now) > now
+
+
+@pytest.mark.asyncio
+async def test_daemon_runs_immediately_and_recovers_after_overrun(monkeypatch, caplog):
+    import asyncio
+    import signal
+
+    from app import main
+
+    monkeypatch.setenv("RUN_INTERVAL_HOURS", "0.000001")
+    handlers = {}
+
+    def capture_signal(signum, handler):
+        previous = handlers.get(signum, signal.SIG_DFL)
+        handlers[signum] = handler
+        return previous
+
+    monkeypatch.setattr(main.signal, "signal", capture_signal)
+
+    class Runner:
+        def __init__(self):
+            self.started = []
+            self.active = 0
+            self.max_active = 0
+
+        async def run_once(self):
+            self.started.append(asyncio.get_running_loop().time())
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                if len(self.started) == 1:
+                    await asyncio.sleep(0.03)
+                    raise RuntimeError("simulated run failure")
+                handlers[signal.SIGINT](signal.SIGINT, None)
+                await asyncio.sleep(0)
+            finally:
+                self.active -= 1
+
+    runner = Runner()
+    with caplog.at_level("INFO"):
+        await main.daemon(None, runner, None)
+
+    assert len(runner.started) == 2
+    assert runner.started[1] - runner.started[0] < 0.5
+    assert runner.max_active == 1
+    assert "daemon started, running first job now" in caplog.text
+    assert "run crashed; daemon continues" in caplog.text
+    assert "run finished in" in caplog.text
+    assert "next run at" in caplog.text
+    assert "daemon sleeping for" in caplog.text
+    assert "daemon stopped" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_daemon_wait_is_interrupted_by_sigterm(monkeypatch):
+    import asyncio
+    import signal
+
+    from app import main
+
+    monkeypatch.setenv("RUN_INTERVAL_HOURS", "3")
+    handlers = {}
+
+    def capture_signal(signum, handler):
+        previous = handlers.get(signum, signal.SIG_DFL)
+        handlers[signum] = handler
+        return previous
+
+    monkeypatch.setattr(main.signal, "signal", capture_signal)
+
+    class Runner:
+        def __init__(self):
+            self.calls = 0
+
+        async def run_once(self):
+            self.calls += 1
+            asyncio.get_running_loop().call_later(
+                0.01, handlers[signal.SIGTERM], signal.SIGTERM, None,
+            )
+
+    runner = Runner()
+    started = asyncio.get_running_loop().time()
+    await main.daemon(None, runner, None)
+
+    assert runner.calls == 1
+    assert asyncio.get_running_loop().time() - started < 1
 
 
 def test_estes_normalize_from_fixture():
@@ -120,6 +206,7 @@ def test_client_folder_resolution_and_discovery():
 
 def test_run_file_logger_creates_per_run_file(tmp_path):
     import logging
+
     from app.logging_setup import run_file_logger
 
     test_logger = logging.getLogger("test_run")
