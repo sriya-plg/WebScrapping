@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import re
+import socket
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -27,6 +28,12 @@ logger = logging.getLogger(__name__)
 def _response_log_url(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def _attach_page_listeners(page: Any, context: Any = None) -> None:
@@ -451,7 +458,7 @@ class PlaywrightProvider(BrowserProvider):
             elif os.name == "posix" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
                 headless = True
 
-            kw: dict[str, Any] = {"headless": headless}
+            kw: dict[str, Any] = {"headless": headless, "timeout": 60_000}
             if self.cfg.channel:
                 kw["channel"] = self.cfg.channel
             if self.cfg.proxy:
@@ -459,7 +466,9 @@ class PlaywrightProvider(BrowserProvider):
             args = []
             if self.engine == "playwright":
                 args.append("--disable-blink-features=AutomationControlled")
-            cdp_port = int(os.environ.get("REMOTE_DEBUGGING_PORT", "9222"))
+            env_cdp_port = os.environ.get("REMOTE_DEBUGGING_PORT")
+            cdp_port = int(env_cdp_port) if env_cdp_port is not None else _free_port()
+            logger.info("chrome remote debugging port=%s", cdp_port)
             if not any(a.startswith("--remote-debugging-port") for a in args):
                 args.append(f"--remote-debugging-port={cdp_port}")
             kw["args"] = args
