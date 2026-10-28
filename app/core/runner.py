@@ -6,10 +6,19 @@ import logging
 import time
 import uuid
 
+from app.backend.client import BackendUnavailable
+from app.core.intake import build_jobs
 from app.core.job import AccountJob, CarrierGuard, RunContext, Services, label
 from app.core.metrics import RunMetrics
 from app.core.resilience import CircuitBreaker, Pacer, retry
-from app.logging_setup import carrier_var, client_var, log, register_secret, run_id_var
+from app.core.batch_updates import enqueue_tracking_updates
+from app.core.diagnostics import log_environment_report, setup_asyncio_exception_handler
+from app.core.intake import build_jobs
+from app.core.job import AccountJob, CarrierGuard, RunContext, Services, label
+from app.core.metrics import RunMetrics
+from app.core.resilience import CircuitBreaker, Pacer, retry
+from app.core.scraper import BatchScraper
+from app.logging_setup import carrier_var, client_var, log, register_secret, run_file_logger, run_id_var
 from app.models import CarrierAccount
 from app.settings import CarrierSpec, SpecResolver
 
@@ -20,6 +29,8 @@ class Runner:
     def __init__(self, sv: Services, resolver: SpecResolver):
         self.sv, self.resolver = sv, resolver
         self._guards: dict[str, CarrierGuard] = {}
+        self._run_lock = asyncio.Lock()
+        self.last_results: list[dict] = []
 
     def _guard(self, spec: CarrierSpec, a: CarrierAccount) -> CarrierGuard:
         L = spec.limits
@@ -40,11 +51,41 @@ class Runner:
 
     async def run_once(self, only: set[str] | None = None, force: bool = False,
                        only_clients: set[str] | None = None) -> dict:
-        ctx = RunContext(run_id=uuid.uuid4().hex[:12], metrics=RunMetrics())
+        async with self._run_lock:
+            run_id = uuid.uuid4().hex[:12]
+            run_id_var.set(run_id)
+            logs_dir = getattr(self.sv.settings, "logs_dir", "logs")
+            with run_file_logger(run_id=run_id, logs_dir=logs_dir) as log_file:
+                logger.info("run started | run_id=%s log_file=%s", run_id, log_file)
+                try:
+                    setup_asyncio_exception_handler(asyncio.get_running_loop(), logger)
+                except Exception:
+                    pass
+                try:
+                    log_environment_report(self.sv.settings, self.resolver, logger)
+                except Exception as env_exc:
+                    logger.warning("failed to log environment report: %s", env_exc)
+                try:
+                    res = await self._run_once(only, force, only_clients)
+                    logger.info("run finished | run_id=%s log_file=%s", run_id, log_file)
+                    return res
+                except Exception as exc:
+                    logger.exception("run failed | run_id=%s log_file=%s error=%s", run_id, log_file, exc)
+                    raise
+
+    async def _run_once(self, only: set[str] | None = None, force: bool = False,
+                        only_clients: set[str] | None = None) -> dict:
+        if hasattr(self.sv.backend, "get_carrier_configs") and hasattr(self.sv.backend, "get_shipments"):
+            return await self._run_batch_once(only, only_clients)
+        rid = run_id_var.get()
+        if not rid or rid == "-":
+            rid = uuid.uuid4().hex[:12]
+            run_id_var.set(rid)
+        ctx = RunContext(run_id=rid, metrics=RunMetrics())
         run_id_var.set(ctx.run_id)
         t0, m = time.time(), ctx.metrics
-        accounts = await retry(self.sv.backend.get_carrier_accounts, attempts=3, base=2, cap=30,
-                               retry_on=(Exception,))
+        accounts = await retry(self.sv.backend.get_carrier_accounts, attempts=1, base=2, cap=30,
+                               retry_on=(BackendUnavailable,))
         jobs: list[tuple[CarrierSpec, CarrierAccount]] = []
         for a in accounts:
             if a.password:
@@ -85,3 +126,93 @@ class Runner:
         summary = m.summary()
         log(logger, logging.INFO, "run complete", run_id=ctx.run_id, seconds=round(time.time() - t0, 1), metrics=summary)
         return summary
+
+    async def _run_batch_once(self, only: set[str] | None, only_clients: set[str] | None) -> dict:
+        """Phase 2 path: intake groups -> browser batches -> raw results, isolated per carrier."""
+        started = time.time()
+        rid = run_id_var.get()
+        if not rid or rid == "-":
+            rid = uuid.uuid4().hex[:12]
+            run_id_var.set(rid)
+        grouped = await build_jobs(self.sv.backend)
+        groups: dict[tuple[int, str], list] = {}
+        for carriers in grouped.values():
+            for carrier_code, jobs in carriers.items():
+                for job in jobs:
+                    groups.setdefault((job.carrier.bill_to, carrier_code), []).append(job)
+        self.last_results = []
+        summary: dict[str, dict] = {}
+
+        async def scrape_group(key: tuple[int, str], jobs: list):
+            bill_to, code = key
+            config = jobs[0].carrier
+            spec = self.resolver.resolve(str(bill_to), code)
+            if spec is None:
+                logger.warning("carrier not configured", extra={"fields": {"bill_to": bill_to,
+                               "carrier_code": code}})
+                return
+            if only and spec.code.upper() not in only:
+                return
+            if only_clients and spec.client.upper() not in only_clients and str(bill_to).upper() not in only_clients:
+                return
+            client_var.set(spec.client)
+            carrier_var.set(spec.code)
+            provider = self.sv.provider_factory(spec.browser, self.sv.settings.state_dir)
+            try:
+                outcome = await BatchScraper(provider, spec, self.sv.settings.debug_dir).run_batch(jobs, spec)
+                activity_stats = await enqueue_tracking_updates(
+                    self.sv.settings, self.sv.backend, config, spec, run_id_var.get() or "", outcome, jobs)
+                self.last_results.append({"client": spec.client, "carrier": spec.code,
+                                          "bill_to": bill_to, "result": outcome})
+                label_key = f"{spec.client}/{spec.code}"
+                found_n = sum(1 for o in outcome.outcomes.values() if o == "found")
+                not_found_n = sum(1 for o in outcome.outcomes.values() if o == "not_found")
+                summary[label_key] = {
+                    "requested": len(outcome.requested),
+                    "received": len(outcome.received),
+                    "found": found_n,
+                    "not_found": not_found_n,
+                    "missing": len(outcome.missing),
+                    "errors": len(outcome.errors),
+                    "activity_posted": activity_stats.get("posted", 0),
+                    "activity_failed": activity_stats.get("failed", 0),
+                }
+                first_err = getattr(outcome, "first_error", None) or ""
+                log(logger, logging.INFO, "carrier batch complete", client=spec.client,
+                    carrier_code=spec.code, bill_to=bill_to, requested=len(outcome.requested),
+                    received=len(outcome.received), found=found_n, not_found=not_found_n,
+                    missing=len(outcome.missing), failures=len(outcome.errors),
+                    first_error=first_err)
+
+                if getattr(self.sv, "queue", None) and (
+                    outcome.error_type == "ChallengeError"
+                    or any(err.get("type") == "ChallengeError" for err in outcome.errors)
+                ):
+                    blocked_refs = [j.search_value for j in jobs if outcome.outcomes.get(j.search_value) == "error"] or outcome.requested
+                    reason = outcome.error_message or "reCAPTCHA challenge presented (manual intervention required)"
+                    await self.sv.queue.raise_(
+                        run_id_var.get() or "",
+                        spec.client,
+                        spec.code,
+                        str(bill_to),
+                        blocked_refs,
+                        reason,
+                        spec.site.tracking_url or config.tracking_url,
+                    )
+            finally:
+                try:
+                    await provider.close()
+                except Exception as exc:
+                    logger.warning("browser provider close failed", extra={"fields": {
+                        "carrier_code": code, "error": type(exc).__name__}})
+
+        outcomes = await asyncio.gather(*(scrape_group(key, jobs) for key, jobs in groups.items()),
+                                         return_exceptions=True)
+        for (bill_to, code), outcome in zip(groups, outcomes):
+            if isinstance(outcome, BaseException):
+                summary[f"{bill_to}/{code}"] = {"failures": 1}
+                logger.error("carrier batch failed | bill_to=%s carrier_code=%s error=%s",
+                             bill_to, code, type(outcome).__name__, exc_info=outcome)
+        log(logger, logging.INFO, "run complete", seconds=round(time.time() - started, 1),
+            carriers_fetched=len(groups), jobs_built=sum(len(j) for j in groups.values()), summary=summary)
+        return {**summary, "scrape_results": self.last_results}

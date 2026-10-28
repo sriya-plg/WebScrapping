@@ -1,5 +1,6 @@
 pydantic>=2.6
 pyyaml>=6.0
+tzdata>=2024.1       # IANA zones for Forward Air TimeZoneCode (Windows has no system tz database)
 httpx>=0.27
 playwright>=1.45
 playwright-stealth>=1.0.6

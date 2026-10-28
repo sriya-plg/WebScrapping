@@ -1,6 +1,6 @@
-# Everything shared by ALL Calix carriers. A carrier's own config.yaml overrides/extends this.
+# Everything shared by ALL Calix carriers. Each carrier's mapping.yaml overrides/extends defaults.
 name: Calix
-bill_to: [CALIX]                 # backend billTo codes handled by this folder
+bill_to: [CALIX, "134034"]      # backend billTo codes handled by this folder
 defaults:
   pending:                       # Calix's "pending housebills" API (same shape for every carrier here)
     endpoint: /calix/housebills/pending?carrier={carrier_code}
@@ -8,7 +8,42 @@ defaults:
     ref_field: proNumber
     search_by_path: searchBy     # first response tells us PRO / BOL / ...
     search_by_default: PRO
-  payload_map:                   # keys Calix's backend expects (VERIFY names)
+  activity:
+    # 2 = processing, 3 = successfully scraped, 4 = failed/not found.
+    ml_status_default: 4
+    ml_status_by_outcome:
+      ok: 3
+      not_found: 4
+      no_response: 4
+      map_failed: 4
+      error: 4
+    # TrackingResult + ctx -> AddCarrierActivity. Paths are dotted (`a.b`) or `=literal`.
+    # Override a key here for all Calix carriers, or in a carrier mapping.yaml under activity:.
+    payload_map:
+      housebill: ctx.housebill
+      proNumber: ctx.pro_number
+      carrierCode: ctx.carrier_code
+      serviceLevel: service_level
+      billTo: ctx.bill_to
+      mlStatus: ctx.ml_status
+      mlLog: ctx.ml_log
+      mlStartDateTime: ctx.ml_start
+      mlEndDateTime: ctx.ml_end
+      mlProcessTime: ctx.ml_process_time
+      mlError: ctx.ml_error
+      reference: reference
+      pieces: pieces
+      podName: pod_name
+      podDateTime: pod_datetime
+    events_map:
+      code: code|status
+      description: description
+      eventDateTime: timestamp
+      timezone: timezone
+      lat: lat
+      long: long
+  # Legacy bulk post (AccountJob path). Batch scrape uses activity.payload_map above.
+  payload_map:
     billTo: ctx.bill_to
     carrierCode: ctx.carrier_code
     housebill: ctx.housebill

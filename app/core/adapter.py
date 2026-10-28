@@ -186,8 +186,20 @@ class GenericAdapter(CarrierAdapter):
             return
         await asyncio.sleep(max(site.settle_s or 0, 2))
 
+    async def _enter_tracking_ref(self, ref: str) -> None:
+        """Type reference into the tracking control (tag widgets need Enter to commit)."""
+        s, sel, site = self.session, self._sel, self.spec.site
+        extra = site.extra or {}
+        if extra.get("tag_input_enter"):
+            await s.fill(sel["input"], ref, human=False)
+            await s.press(sel["input"], "Enter")
+            return
+        await s.fill(sel["input"], ref)
+
     async def _search(self, ref: str, ref_type: str) -> list[CapturedResponse]:
         s, sel, site = self.session, self._sel, self.spec.site
+        extra = site.extra or {}
+        submit_force = bool(extra.get("submit_force_click"))
 
         if site.ref_type_select:
             await s.select_option(
@@ -228,13 +240,30 @@ class GenericAdapter(CarrierAdapter):
         # does not submit the tracking form. The click can fail fast when
         # the Angular form isn't ready, so we re-fill and click again.
         # --------------------------------------------------------------
+        if extra.get("tag_input_enter"):
+            await self._before_submit(ref)
+
+            async def _tag_submit() -> None:
+                await self._enter_tracking_ref(ref)
+
+            got = await s.capture_all(
+                _tag_submit,
+                timeout_s=site.response_timeout_s,
+                **kw,
+            )
+            return all_got + got
+
         if sel.get("submit"):
             for attempt in range(1, SUBMIT_ATTEMPTS + 1):
                 try:
-                    await s.fill(sel["input"], ref)      # re-fill: the app may have reset the form
+                    await self._enter_tracking_ref(ref)
                     await self._before_submit(ref)
+
+                    async def _click_submit() -> None:
+                        await s.click(sel["submit"], force=submit_force)
+
                     got = await s.capture_all(
-                        lambda: s.click(sel["submit"]),
+                        _click_submit,
                         timeout_s=min(site.response_timeout_s, SUBMIT_ATTEMPT_TIMEOUT_S),
                         **kw,
                     )
@@ -254,7 +283,7 @@ class GenericAdapter(CarrierAdapter):
         # Some carriers submit the search box with Enter but do not have
         # a usable submit button.
         # --------------------------------------------------------------
-        await s.fill(sel["input"], ref)
+        await self._enter_tracking_ref(ref)
         await self._before_submit(ref)
         got = await s.capture_all(
             lambda: s.press(sel["input"], "Enter"),
@@ -270,11 +299,17 @@ class GenericAdapter(CarrierAdapter):
 
     def _pick(self, got: list[CapturedResponse], ref: str) -> CapturedResponse | None:
         site = self.spec.site
-        rx = re.compile(site.response_regex) if site.response_regex else None
+        pattern = site.response_url_pattern or site.response_regex
+        rx = re.compile(pattern) if pattern else None
         key = re.sub(r"\W", "", ref).lower()
         cands = [g for g in got if g.status == 200 and isinstance(g.json, (dict, list)) and (not rx or rx.search(g.url))]
         if site.match_ref:
             cands = [g for g in cands if _contains_ref(g.json, key)]
+        if site.response_url_prefer:
+            prefer = re.compile(site.response_url_prefer)
+            preferred = [g for g in cands if prefer.search(g.url)]
+            if preferred:
+                cands = preferred
         return max(cands, key=lambda g: len(json.dumps(g.json)), default=None)   # richest match
 
     async def _raise_for_miss(self, got: list[CapturedResponse], ref: str) -> None:

@@ -10,26 +10,72 @@ import asyncio
 import time
 
 from app.core.adapter import GenericAdapter
+from app.core.login import LoginError, execute_login
 from app.core.resilience import ManualInterventionRequired
 
 RECAPTCHA_ANCHOR_FRAME = 'iframe[title="reCAPTCHA"]:visible'
 RECAPTCHA_CHECKBOX = "#recaptcha-anchor"
 
 
+CONSENT_CLOSE_SELECTORS = (
+    "#onetrust-pc-sdk button.ot-close-icon",
+    "#onetrust-pc-sdk .ot-close-icon",
+    "#onetrust-close-btn-container button",
+    "#onetrust-banner-sdk #onetrust-reject-all-handler",
+    "#onetrust-banner-sdk #onetrust-accept-btn-handler",
+    "[role='dialog'] button[aria-label='Close' i]",
+    "[role='dialog'] button[title='Close' i]",
+    "[aria-modal='true'] button[aria-label='Close' i]",
+)
+
+
 class SaiaAdapter(GenericAdapter):
+    async def _dismiss_consent_dialog(self) -> None:
+        """Close Saia's 'Do Not Sell Or Share My Personal Information' / cookie dialog; it covers the form."""
+        page = getattr(self.session, "page", None)
+        if page is None:
+            return
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            for sel in CONSENT_CLOSE_SELECTORS:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible():
+                        await btn.click(timeout=3000)
+                        self.log.info("dismissed consent dialog via %s", sel)
+                        await asyncio.sleep(0.5)
+                        return
+                except Exception:
+                    continue
+            await asyncio.sleep(0.5)
+        try:  # fallback: dialog with the privacy heading -> click its close (x) or press Escape
+            dlg = page.locator("[role='dialog'], [aria-modal='true'], #onetrust-pc-sdk").filter(
+                has_text="Do Not Sell").first
+            if await dlg.is_visible():
+                close = dlg.locator("button:has-text('×'), button:has-text('✕'), button[class*='close' i]").first
+                if await close.count():
+                    await close.click(timeout=3000)
+                else:
+                    await page.keyboard.press("Escape")
+                self.log.info("dismissed consent dialog via fallback")
+        except Exception as exc:
+            self.log.debug("no consent dialog to dismiss: %s", exc)
+
     async def _on_landing(self) -> None:
         await self._clear_challenge()
-        login = self.spec.site.extra.get("login")          # optional: site.extra.login in mapping.yaml
-        if login and self.account.user_name and self.account.password:
-            s = self.session
-            await s.goto(login["url"])
-            await self._clear_challenge()
-            await s.fill(login["user_selector"], self.account.user_name)
-            await s.fill(login["pass_selector"], self.account.password.get_secret_value())
-            await s.click(login["submit_selector"])
-            if not await s.wait_for_selector(login["logged_in_selector"], 25):
-                raise ManualInterventionRequired("saia login did not complete (bad credentials / MFA?)", login["url"])
-            await s.goto(self.url)
+        await self._dismiss_consent_dialog()
+        login = self.spec.site.login or self.spec.site.extra.get("login")
+        if login and login.get("enabled", False):
+            try:
+                await execute_login(
+                    self.session,
+                    self.spec,
+                    self.account.user_name,
+                    self.account.password,
+                    self.url,
+                )
+            except LoginError as exc:
+                raise ManualInterventionRequired(str(exc), self.url) from exc
             await self._clear_challenge()
         await self.session.save_state()
 
@@ -42,6 +88,7 @@ class SaiaAdapter(GenericAdapter):
 
     async def _before_submit(self, ref: str) -> None:
         """Handle Saia Google reCAPTCHA checkbox before clicking submit."""
+        await self._dismiss_consent_dialog()
         await self._handle_recaptcha()
 
     async def _is_recaptcha_verified(self) -> bool:

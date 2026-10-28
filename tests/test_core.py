@@ -4,16 +4,16 @@ import time
 
 import pytest
 
+from app.backend.client import FileBackend
 from app.core import registry
 from app.core.intervention import InterventionQueue
-from app.core.postprocess import build_payload, get_path
+from app.core.mapper import build_payload, get_path
 from app.core.resilience import CircuitBreaker, NotFoundError, TransientError, retry
 from app.core.runner import Runner
 from app.core.scheduler import JitterSchedule
 from app.core.state import StateStore
 from app.models import CarrierAccount
 from app.settings import AlertSettings, AppSettings, load_resolver
-from app.backend.client import FileBackend
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RES = load_resolver(ROOT / "app/clients")
@@ -31,10 +31,96 @@ def test_jitter_bounds_restart_safe_and_no_drift():
     assert s.next_after(now) > now
 
 
+@pytest.mark.asyncio
+async def test_daemon_runs_immediately_and_recovers_after_overrun(monkeypatch, caplog):
+    import asyncio
+    import signal
+
+    from app import main
+
+    monkeypatch.setenv("RUN_INTERVAL_HOURS", "0.000001")
+    handlers = {}
+
+    def capture_signal(signum, handler):
+        previous = handlers.get(signum, signal.SIG_DFL)
+        handlers[signum] = handler
+        return previous
+
+    monkeypatch.setattr(main.signal, "signal", capture_signal)
+
+    class Runner:
+        def __init__(self):
+            self.started = []
+            self.active = 0
+            self.max_active = 0
+
+        async def run_once(self):
+            self.started.append(asyncio.get_running_loop().time())
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                if len(self.started) == 1:
+                    await asyncio.sleep(0.03)
+                    raise RuntimeError("simulated run failure")
+                handlers[signal.SIGINT](signal.SIGINT, None)
+                await asyncio.sleep(0)
+            finally:
+                self.active -= 1
+
+    runner = Runner()
+    with caplog.at_level("INFO"):
+        await main.daemon(None, runner, None)
+
+    assert len(runner.started) == 2
+    assert runner.started[1] - runner.started[0] < 0.5
+    assert runner.max_active == 1
+    assert "daemon started, running first job now" in caplog.text
+    assert "run crashed; daemon continues" in caplog.text
+    assert "run finished in" in caplog.text
+    assert "next run at" in caplog.text
+    assert "daemon sleeping for" in caplog.text
+    assert "daemon stopped" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_daemon_wait_is_interrupted_by_sigterm(monkeypatch):
+    import asyncio
+    import signal
+
+    from app import main
+
+    monkeypatch.setenv("RUN_INTERVAL_HOURS", "3")
+    handlers = {}
+
+    def capture_signal(signum, handler):
+        previous = handlers.get(signum, signal.SIG_DFL)
+        handlers[signum] = handler
+        return previous
+
+    monkeypatch.setattr(main.signal, "signal", capture_signal)
+
+    class Runner:
+        def __init__(self):
+            self.calls = 0
+
+        async def run_once(self):
+            self.calls += 1
+            asyncio.get_running_loop().call_later(
+                0.01, handlers[signal.SIGTERM], signal.SIGTERM, None,
+            )
+
+    runner = Runner()
+    started = asyncio.get_running_loop().time()
+    await main.daemon(None, runner, None)
+
+    assert runner.calls == 1
+    assert asyncio.get_running_loop().time() - started < 1
+
+
 def test_estes_normalize_from_fixture():
-    from app.clients.calix.carriers.estes.adapter import EstesAdapter
+    from app.core.adapter import GenericAdapter
     raw = json.loads((ROOT / "tests/fixtures/estes_response.json").read_text())
-    a = EstesAdapter(RES.resolve("CALIX", "ESTES"), ACCT, None)
+    a = GenericAdapter(RES.resolve("CALIX", "ESTES"), ACCT, None)
     r = a.normalize(raw, "1234567890", "PRO")
     assert r.status == "DELIVERED" and r.delivered and r.weight == 1250.0 and r.pieces == 4
     assert r.events[0].description == "Delivered"
@@ -48,6 +134,7 @@ def test_get_path_fallbacks():
     assert get_path({"l": [{"k": 2}]}, "l.0.k") == 2
 
 
+@pytest.mark.asyncio
 async def test_retry_and_breaker():
     n = {"c": 0}
 
@@ -64,6 +151,7 @@ async def test_retry_and_breaker():
     t[0] = 101; assert b.allow()
 
 
+@pytest.mark.asyncio
 async def test_partial_failure_and_idempotency(tmp_path):
     from app.core.adapter import CarrierAdapter
     from app.models import TrackingResult
@@ -83,8 +171,10 @@ async def test_partial_failure_and_idempotency(tmp_path):
         v.limits.min_delay_s = v.limits.max_delay_s = 0
         v.limits.retries = 1
     store = StateStore(":memory:")
-    mk = lambda: Runner(s, FileBackend(s.backend), store, InterventionQueue(store, AlertSettings()), specs,
-                        provider_factory=lambda cfg, d: type("P", (), {"close": lambda self: _noop()})())
+    from app.core.job import Services
+    sv = Services(s, FileBackend(s.backend), store, InterventionQueue(store, AlertSettings()),
+                  provider_factory=lambda cfg, d: type("P", (), {"close": lambda self: _noop()})())
+    mk = lambda: Runner(sv, specs)
     async def _noop(): return None
     m1 = await mk().run_once(force=True)
     assert m1["calix/ESTES"]["success"] == 1 and m1["calix/ESTES"]["failed"] == 1 and m1["calix/ESTES"]["posted"] == 1
@@ -97,17 +187,35 @@ async def test_partial_failure_and_idempotency(tmp_path):
 def test_client_folder_resolution_and_discovery():
     RES = load_resolver(ROOT / "app/clients")
     s = RES.resolve("CALIX", "ESTES")
+    saia = RES.resolve("CALIX", "SAIA")
     assert s.client == "calix" and s.code == "ESTES"
     assert s.pending["endpoint"].startswith("/calix/")            # from client.yaml defaults
-    assert s.adapter["tracking_page"].startswith("https://www.estes")  # from the carrier's own config.yaml
+    assert saia.site.tracking_url.startswith("https://www.saia")
     assert s.post_hook == "app.clients.calix.carriers.estes.hooks:post"  # auto-detected hooks.py
     assert RES.resolve("calix", "exla") is s and RES.resolve("CALIX", "FWDA").code == "FORWARDAIR"  # aliases
     assert RES.carriers("calix") == ["ESTES", "FORWARDAIR", "SAIA"]
     assert RES.resolve("OTHERCO", "ESTES") is None
     registry._REG.clear(); registry.discover()
     assert registry.get_adapter_class("SAIA", "calix").__name__ == "SaiaAdapter"
-    assert registry.get_adapter_class("FORWARDAIR", "calix").__name__ == "ForwardAirAdapter"
+    assert registry.get_adapter_class("FORWARDAIR", "calix").__name__ == "GenericAdapter"
     from app.models import TrackingResult
     p = build_payload(s, TrackingResult(reference="1", ref_type="PRO", carrier_code="ESTES", bill_to="CALIX",
                                         delivery_date="2026-10-01T10:00"), ACCT, "r")
     assert p["housebill"] == "1" and p["deliveryDate"] == "2026-10-01"
+
+
+def test_run_file_logger_creates_per_run_file(tmp_path):
+    import logging
+
+    from app.logging_setup import run_file_logger
+
+    test_logger = logging.getLogger("test_run")
+    with run_file_logger(run_id="abc123test", logs_dir=tmp_path) as log_file:
+        test_logger.info("testing per-run file logger")
+        assert log_file.exists()
+        assert "run_" in log_file.name
+        assert "abc123test" in log_file.name
+
+    content = log_file.read_text(encoding="utf-8")
+    assert "testing per-run file logger" in content
+

@@ -1,0 +1,58 @@
+{
+  "proNumber": "77137570910",
+  "shipper": {
+    "name": "CALIX",
+    "city": "COPPELL",
+    "state": "TX",
+    "zip": "75019"
+  },
+  "consignee": {
+    "name": "ALLO COMMUNICATIONS",
+    "city": "YUMA",
+    "state": "AZ",
+    "zip": "85364"
+  },
+  "referenceNumbers": {
+    "customerBOLNumber": "23671828",
+    "purchaseOrderNumber": "PO-0020396"
+  },
+  "deliveryInformation": {
+    "expectedDeliveryDate": "Contact Customer Service 800-765-7242",
+    "deliveryDate": "2026-09-15",
+    "deliveryTime": { "from": "12:12", "to": "12:13" },
+    "signature": "Received by-Shawn"
+  },
+  "shipmentInformation": {
+    "totalPieces": "1",
+    "totalWeight": "224",
+    "type": "PPD",
+    "pickupDate": "2026-09-10",
+    "status": "Delivered"
+  },
+  "history": [
+    {
+      "activity": "Delivered",
+      "city": "YUMA",
+      "date": "2026-09-15",
+      "state": "AZ",
+      "time": "12:13 pm",
+      "display": true
+    },
+    {
+      "activity": "Arrived at Destination Terminal",
+      "city": "Calexico",
+      "date": "2026-09-15",
+      "state": "CA",
+      "time": "06:51 am",
+      "display": false
+    },
+    {
+      "activity": "Pickup from Customer",
+      "city": "COPPELL",
+      "date": "2026-09-10",
+      "state": "TX",
+      "time": "02:24 pm",
+      "display": false
+    }
+  ]
+}

@@ -1,18 +1,39 @@
 """Pure functions (no I/O): raw carrier JSON -> common schema -> backend payload.
-Stage 1 (carrier-specific):  normalize()      explicit mapping.yaml paths, auto-detection fills the gaps
-Stage 2 (client-specific):   build_payload()  client.yaml payload_map (+ optional hooks.py)"""
+Stage 1 (carrier-specific):  normalize()      mapping.yaml fields/events (auto-detection fills gaps)
+Stage 2 (client-specific):   apply_map()      client.yaml payload_map / activity.payload_map / events_map
+                                             (+ optional hooks.py)"""
 from __future__ import annotations
 
 import importlib
 import re
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.models import CarrierAccount, TrackingEvent, TrackingResult
 from app.settings import CarrierSpec
 
+_TIME_WITH_OFFSET_RX = re.compile(
+    r"^(\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*[+-]\d{2}:?\d{2}$"
+)
 
-def get_path(obj: Any, path: str, default: Any = None) -> Any:
+
+def strip_time_offset(value: Any) -> Any:
+    """Strip numeric timezone offset from time strings (e.g. '15:18:00-05:00' -> '15:18:00').
+
+    Prevents unintended timezone conversions when carrier responses provide local clock times with offsets.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    m_time = _TIME_WITH_OFFSET_RX.match(text)
+    if m_time:
+        return m_time.group(1)
+    return value
+
+
+def get_path(obj: Any, path: str, default: Any = None, *, strip_offset: bool = True) -> Any:
     """Dotted path with list indexes; 'a.b|c.d' = first non-empty alternative."""
     for alt in path.split("|"):
         cur, ok = obj, True
@@ -27,12 +48,82 @@ def get_path(obj: Any, path: str, default: Any = None) -> Any:
                     break
             elif isinstance(cur, dict) and part in cur:
                 cur = cur[part]
+            elif isinstance(cur, dict) and part.strip("[]").isdigit() and int(part.strip("[]")) == 0:
+                continue
             else:
                 ok = False
                 break
         if ok and cur not in (None, "", []):
-            return cur
+            return strip_time_offset(cur) if strip_offset and isinstance(cur, str) else cur
     return default
+
+
+_COMPOSE_RX = re.compile(r"\{([^}]+)\}")
+
+
+def compose_value(obj: Any, template: str, *, preserve_offset: bool = False) -> Any:
+    """Fill `{dotted.path}` placeholders from obj. Used by mapping.yaml `compose:`."""
+    if not template:
+        return None
+    if "{" not in template:
+        return get_path(obj, template)
+    filled = False
+
+    def repl(match: re.Match) -> str:
+        nonlocal filled
+        value = get_path(obj, match.group(1).strip(), strip_offset=not preserve_offset)
+        if value in (None, ""):
+            return ""
+        filled = True
+        return str(value)
+
+    text = _COMPOSE_RX.sub(repl, template)
+    if not filled:
+        return None
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r",\s*$", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" ,")
+    if not preserve_offset:
+        text = strip_time_offset(text)
+    return text or None
+
+
+def parse_loose_datetime(value: Any) -> str | None:
+    """Turn Saia-style `2026-09-15` + `12:13 pm` (or already-ISO) into ISO-8601."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.replace(microsecond=0).isoformat()
+    text = re.sub(r"\s+", " ", str(value).strip())
+    if not text:
+        return None
+    text = strip_time_offset(text)
+    text = text.rstrip("T").strip()
+    text = text.replace("Z", "")
+    text = re.sub(r"\b([ap])\.?m\.?\b", lambda m: m.group(1).upper() + "M", text, flags=re.I)
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %I:%M %p",
+        "%Y-%m-%d %I:%M%p",
+        "%Y-%m-%d",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y %I:%M %p",
+        "%m/%d/%Y %I:%M%p",
+        "%m/%d/%Y",
+    ):
+        try:
+            return datetime.strptime(text, fmt).isoformat()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text).replace(microsecond=0).isoformat()
+    except ValueError:
+        return text
 
 
 def _nk(k: Any) -> str:
@@ -51,6 +142,9 @@ _FIELD_RX = {k: re.compile(v) for k, v in {
                    r"consigneelocation|consigneecity|dest)$",
     "pieces": r"^(pieces|piececount|pcs|totalpieces|handlingunits|handlingunitcount)$",
     "weight": r"^(weight|totalweight|grossweight|shipmentweight)$",
+    "service_level": r"^(servicelevel|servicetype|service)$",
+    "pod_name": r"^(podname|signedby|signature|receivedby|signee|podsignature)$",
+    "pod_datetime": r"^(poddatetime|poddate|signeddate|deliverysignaturedate)$",
 }.items()}
 _EV_LIST_RX = re.compile(r"(history|events?|activity|activities|trace|tracking|milestones?|scans?|statuses|"
                          r"details|checkpoints?|progress)")
@@ -60,6 +154,10 @@ _EV_CANDIDATES = {
                     "statusdescription", "status", "text"],
     "location": ["location", "eventlocation", "city", "terminal", "facility", "site", "place"],
     "status": ["status", "statuscode", "eventtype", "type"],
+    "code": ["code", "statuscode", "eventcode", "eventtype", "type"],
+    "timezone": ["timezone", "tz", "timezonename"],
+    "lat": ["lat", "latitude"],
+    "long": ["long", "lng", "longitude"],
 }
 
 
@@ -153,20 +251,244 @@ def status_from_text(text: str, status_map: dict[str, str]) -> str:
     return "UNKNOWN"
 
 
+# Forward Air sends TimeZoneCode (ET/CT/MT/PT) beside a clock time that has no offset.
+_TZ_ABBREV = {
+    "ET": "America/New_York",
+    "EST": "America/New_York",
+    "EDT": "America/New_York",
+    "CT": "America/Chicago",
+    "CST": "America/Chicago",
+    "CDT": "America/Chicago",
+    "MT": "America/Denver",
+    "MST": "America/Denver",
+    "MDT": "America/Denver",
+    "PT": "America/Los_Angeles",
+    "PST": "America/Los_Angeles",
+    "PDT": "America/Los_Angeles",
+}
+
+
+# Standard-time UTC offset (hours) for the zones above, used only when the system
+# timezone database is unavailable (Windows without the tzdata package).
+_US_STANDARD_OFFSET_HOURS = {
+    "America/New_York": -5,
+    "America/Chicago": -6,
+    "America/Denver": -7,
+    "America/Los_Angeles": -8,
+}
+
+
+def _nth_sunday(year: int, month: int, nth: int) -> datetime:
+    first = datetime(year, month, 1)
+    first_sunday = 1 + (6 - first.weekday()) % 7
+    return datetime(year, month, first_sunday + 7 * (nth - 1))
+
+
+def _us_zone_fallback(zone_name: str, naive: datetime) -> timezone:
+    """US rules: DST runs from the second Sunday of March to the first Sunday of November, 02:00 local."""
+    standard = _US_STANDARD_OFFSET_HOURS[zone_name]
+    start = _nth_sunday(naive.year, 3, 2).replace(hour=2)
+    end = _nth_sunday(naive.year, 11, 1).replace(hour=2)
+    offset = standard + 1 if start <= naive < end else standard
+    return timezone(timedelta(hours=offset))
+
+
+def _zone_for(zone_name: str, naive: datetime):
+    try:
+        return ZoneInfo(zone_name)
+    except ZoneInfoNotFoundError:
+        return _us_zone_fallback(zone_name, naive)
+
+
+def apply_zone_abbrev(value: str | None, label: str | None) -> str | None:
+    """Attach a named zone to a naive timestamp so UTC conversion keeps that clock time."""
+    if value in (None, ""):
+        return value
+    zone_name = _TZ_ABBREV.get(str(label or "").strip().upper())
+    if not zone_name:
+        return value
+    parsed = parse_loose_datetime(value) or str(value)
+    try:
+        dt = datetime.fromisoformat(parsed)
+    except ValueError:
+        return value
+    if dt.tzinfo is not None:
+        return parsed
+    return dt.replace(tzinfo=_zone_for(zone_name, dt)).isoformat()
+
+
+def _delivery_zone_label(events: list[TrackingEvent]) -> str | None:
+    """Zone on the delivery scan. PodDate has no zone of its own; the DLV row does."""
+    for event in events:
+        code = str(event.code or "").strip().upper()
+        text = " ".join(part for part in (event.status, event.description) if part).lower()
+        if code == "DLV" or ("deliver" in text and "out for" not in text):
+            if event.timezone:
+                return event.timezone
+    return None
+
+
+def _time_sort_key(value: Any) -> tuple:
+    text = "" if value in (None, "") else str(value)
+    parsed = parse_loose_datetime(text) if text else None
+    if parsed:
+        try:
+            dt = datetime.fromisoformat(parsed)
+        except ValueError:
+            dt = None
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (1, dt.timestamp())
+    return (0, text)
+
+
+def _row_max(rows: list, template: str, *, preserve_offset: bool = False) -> dict | None:
+    """Pick the row whose composed template is latest. Ties keep the last row."""
+    best, best_key = None, None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = compose_value(row, template, preserve_offset=preserve_offset) if template and "{" in template else get_path(row, template, strip_offset=not preserve_offset)
+        key = _time_sort_key(text)
+        if best is None or key >= best_key:
+            best, best_key = row, key
+    return best
+
+
+def _explode_events(items: list, explode: str | None, append_parent: bool = False) -> list[dict]:
+    """One output row per child list (Estes statusHistory). Parent fields fill gaps on each child."""
+    if not explode:
+        return [it for it in items if isinstance(it, dict)]
+    drop = explode.split(".")[0]
+    out: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        children = get_path(it, explode, None)
+        if children is None:
+            out.append(it)
+            continue
+        if not isinstance(children, list) or not children:
+            if not append_parent:
+                out.append(it)
+            continue
+        parent = {k: v for k, v in it.items() if k != drop}
+        child_rows = [child for child in children if isinstance(child, dict)]
+        for child in child_rows:
+            out.append({**parent, **child, "_movement_event": False})
+        if append_parent and child_rows:
+            latest = _row_max(child_rows, "{referenceDate}T{referenceTime}", preserve_offset=True)
+            if latest:
+                out.append({**parent, **latest, "_movement_event": True})
+    return out
+
+
+def _prepare_event_item(item: dict, select: dict | None) -> dict:
+    """Copy `item` and attach selected child rows (for example statusHistory max time)."""
+    prepared = dict(item)
+    for alias, spec in (select or {}).items():
+        if not alias or not isinstance(spec, dict):
+            continue
+        rows = get_path(prepared, str(spec.get("from") or ""), []) or []
+        if not isinstance(rows, list):
+            continue
+        chosen = _row_max(rows, str(spec.get("max") or ""))
+        if chosen:
+            prepared[alias] = chosen
+    return prepared
+
+
+def _assign_event_fields(data: dict, item: dict, raw: dict, rules: list | None) -> None:
+    """Fill empty event fields from the root document when `if: field=value` matches."""
+    for rule in rules or []:
+        if not isinstance(rule, dict):
+            continue
+        cond = str(rule.get("if") or "")
+        if "=" in cond:
+            field, expected = cond.split("=", 1)
+            if str(item.get(field.strip(), "")) != expected.strip():
+                continue
+        for field, path in (rule.get("set") or {}).items():
+            if data.get(field) not in (None, ""):
+                continue
+            value = get_path(raw, str(path))
+            if value not in (None, ""):
+                data[field] = value
+
+
 # --------------------------------------------------------------------------------------- stage 1
 def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: CarrierAccount) -> TrackingResult:
     m, notes = spec.mapping, []
     vals: dict[str, Any] = {f: get_path(raw, p) for f, p in m.fields.items()}
+    for field, template in (m.compose or {}).items():
+        composed = compose_value(raw, template)
+        if composed not in (None, ""):
+            vals[field] = composed
+            notes.append(f"compose:{field}")
+    if vals.get("pod_datetime"):
+        vals["pod_datetime"] = parse_loose_datetime(vals["pod_datetime"]) or vals["pod_datetime"]
     if m.auto:
         for f, (p, v) in auto_fields(raw).items():
             if vals.get(f) in (None, ""):
                 vals[f] = v
                 notes.append(f"auto:{f}<-{p}")
     events: list[TrackingEvent] = []
-    if m.events:
+    if m.events and m.events.get("path"):
         flds = m.events.get("fields", {})
-        events = [TrackingEvent(**{f: get_path(it, p) for f, p in flds.items()})
-                  for it in (get_path(raw, m.events["path"], []) or [])]
+        compose_ev = m.events.get("compose") or {}
+        select = m.events.get("select") or {}
+        assign = m.events.get("assign") or []
+        preserve_offset = bool(m.events.get("preserve_offset"))
+        rows = _explode_events(
+            get_path(raw, m.events["path"], []) or [], m.events.get("explode"),
+            append_parent=bool(m.events.get("append_parent_event")),
+        )
+        for it in rows:
+            prepared = _prepare_event_item(it, select)
+            is_movement_event = bool(it.get("_movement_event"))
+            event_fields = m.events.get("movement_fields", {}) if is_movement_event else flds
+            data = {f: get_path(prepared, p, strip_offset=not preserve_offset) for f, p in event_fields.items() if f and p}
+            event_compose = m.events.get("movement_fields_compose", {}) if is_movement_event else compose_ev
+            for field, template in event_compose.items():
+                composed = compose_value(prepared, template, preserve_offset=preserve_offset)
+                if composed not in (None, ""):
+                    data[field] = composed
+            _assign_event_fields(data, prepared, raw, assign)
+            raw_ts = data.get("timestamp")
+            if raw_ts and not preserve_offset:
+                raw_ts = strip_time_offset(raw_ts)
+                parsed_ts = parse_loose_datetime(raw_ts) or raw_ts
+                data["timestamp"] = apply_zone_abbrev(parsed_ts, data.get("timezone"))
+            elif raw_ts:
+                parsed_ts = parse_loose_datetime(raw_ts) or raw_ts
+                data["timestamp"] = parsed_ts
+                try:
+                    offset = datetime.fromisoformat(parsed_ts).utcoffset()
+                    if data.get("timezone") in (None, "") and offset is not None:
+                        total_minutes = int(offset.total_seconds() // 60)
+                        sign = "+" if total_minutes >= 0 else "-"
+                        total_minutes = abs(total_minutes)
+                        data["timezone"] = f"{sign}{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+                except ValueError:
+                    pass
+            events.append(TrackingEvent(**data))
+        if m.events.get("append_parent_event"):
+            unique: dict[tuple, TrackingEvent] = {}
+            for event in events:
+                identity = tuple(getattr(event, key, None) for key in (
+                    "code", "state", "city", "description", "timestamp", "timezone", "lat", "long",
+                ))
+                unique[identity] = event
+            events = list(unique.values())
+        delivery_zone = _delivery_zone_label(events)
+        if delivery_zone and not spec.activity.preserve_pod_datetime:
+            zoned = apply_zone_abbrev(vals.get("pod_datetime"), delivery_zone)
+            if zoned:
+                vals["pod_datetime"] = zoned
+            zoned_delivery = apply_zone_abbrev(vals.get("delivery_date"), delivery_zone)
+            if zoned_delivery:
+                vals["delivery_date"] = zoned_delivery
     elif m.auto and (found := auto_events(raw)):
         events = found[1]
         notes.append(f"auto:events<-{found[0]}")
@@ -187,6 +509,16 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
 
 
 # --------------------------------------------------------------------------------------- stage 2
+def apply_map(data: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
+    """Apply a YAML map of output_key -> dotted path or `=literal`."""
+    payload: dict[str, Any] = {}
+    for key, path in (mapping or {}).items():
+        if not key or path is None or path == "":
+            continue
+        payload[key] = path[1:] if str(path).startswith("=") else get_path(data, str(path))
+    return payload
+
+
 def _load_hook(path: str):
     mod, fn = path.split(":")
     return getattr(importlib.import_module(mod), fn)
@@ -197,9 +529,7 @@ def build_payload(spec: CarrierSpec, result: TrackingResult, account: CarrierAcc
     data = result.model_dump(mode="json", exclude={"raw"})
     data["ctx"] = {"bill_to": account.bill_to, "carrier_code": spec.code, "client": spec.client,
                    "customer_name": account.customer_name, "run_id": run_id, **(meta or {})}
-    payload: dict[str, Any] = {}
-    for key, path in spec.payload_map.items():
-        payload[key] = path[1:] if path.startswith("=") else get_path(data, path)
+    payload = apply_map(data, spec.payload_map)
     if spec.post_hook:
         payload = _load_hook(spec.post_hook)(payload, result, account) or payload
     return payload

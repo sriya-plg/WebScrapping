@@ -17,13 +17,27 @@ class CapturedResponse:
 
 
 class BrowserSession(ABC):
+    cdp_url: str | None = None
+
     @abstractmethod
     async def goto(self, url: str) -> None: ...
     @abstractmethod
-    @abstractmethod
     async def fill(self, selector: str, value: str, human: bool = True, frame: str | None = None) -> None: ...
+    async def type_text(
+        self,
+        selector: str,
+        text: str,
+        delay_ms: float = 0,
+        clear: bool = False,
+        frame: str | None = None,
+    ) -> None:
+        """Type text into selector gradually or sequentially with delay_ms per character."""
+        await self.fill(selector, text, human=bool(delay_ms > 0), frame=frame)
+    async def get_value(self, selector: str, frame: str | None = None) -> str:
+        """Retrieve current value of an input or textarea element."""
+        return ""
     @abstractmethod
-    async def click(self, selector: str, frame: str | None = None) -> None: ...
+    async def click(self, selector: str, frame: str | None = None, force: bool = False) -> None: ...
     @abstractmethod
     async def press(self, selector: str, key: str, frame: str | None = None) -> None: ...
     @abstractmethod
@@ -44,6 +58,10 @@ class BrowserSession(ABC):
         `until(responses)` is true (then waits `settle_s`), else after `settle_s` of silence, else at timeout."""
     @abstractmethod
     async def looks_blocked(self, markers: list[str] | None = None) -> bool: ...
+    async def save_debug(self, path: str) -> str:
+        raise NotImplementedError("browser session does not support diagnostic screenshots")
+    def current_url(self) -> str:
+        raise NotImplementedError("browser session does not expose its current URL")
     @abstractmethod
     async def save_state(self) -> None: ...
     @abstractmethod

@@ -8,6 +8,55 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
+class CarrierConfig(BaseModel):
+    """Carrier configuration returned by the shipment backend."""
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+    id: int
+    carrier_name: str = Field(alias="carrierName")
+    carrier_code: str = Field(alias="carrierCode")
+    tracking_url: str | None = Field(None, alias="trackingUrl")
+    bill_to: int = Field(alias="billTo")
+    customer_name: str | None = Field(None, alias="customerName")
+    processing_frequency: int | None = Field(None, alias="processingFrequency")
+    processing_delay: int | None = Field(None, alias="processingDelay")
+    user_name: str | None = Field(None, alias="userName")
+    password: SecretStr | None = None
+    is_active: bool = Field(alias="isActive")
+    created_by: int | None = Field(None, alias="createdBy")
+    search_by: str = Field("proNumber", alias="searchBy")
+
+
+class ShipmentRef(BaseModel):
+    """Row from GetCarrierShipmentDetails (Pegasus order entry)."""
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+    housebill: str
+    pro_number: str = Field(alias="proNumber")
+    vendor_id: str = Field(default="", alias="vendorId")
+    carrier_code: str | None = Field(None, alias="carrierCode")
+    service_level: str | None = Field(None, alias="serviceLevel")
+    status: str | None = None
+
+    @field_validator("housebill", mode="before")
+    @classmethod
+    def _housebill_as_str(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+
+class TrackingJob(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    carrier: CarrierConfig
+    shipment: ShipmentRef
+    search_by: str
+    search_value: str
+
+    def __repr__(self) -> str:
+        return (f"TrackingJob(carrier_code={self.carrier.carrier_code!r}, "
+                f"bill_to={self.carrier.bill_to!r}, search_by={self.search_by!r}, "
+                f"search_value={self.search_value!r}, credentials=<redacted>)")
+
+
 class CarrierAccount(BaseModel):
     """One record from the backend 'carrier config' API (camelCase on the wire).
     Credentials are SecretStr: masked in repr/logs, held in memory only."""
@@ -25,6 +74,7 @@ class CarrierAccount(BaseModel):
     password: SecretStr | None = None
     is_active: bool = Field(True, alias="isActive")
     total_count: int | None = Field(None, alias="totalCount")
+    search_by: str = Field("proNumber", alias="searchBy")
 
 
 class PendingRef(BaseModel):
@@ -41,11 +91,17 @@ class PendingBatch(BaseModel):
 
 
 class TrackingEvent(BaseModel):
-    model_config = ConfigDict(coerce_numbers_to_str=True)
+    """Canonical event. Extra keys from mapping.yaml are kept (extra=allow) so new
+    carrier fields can be mapped to the backend payload without a code change."""
+    model_config = ConfigDict(coerce_numbers_to_str=True, extra="allow")
     timestamp: str | None = None
     description: str | None = None
     location: str | None = None
     status: str | None = None
+    code: str | None = None
+    timezone: str | None = None
+    lat: float | None = None
+    long: float | None = None
 
 
 def _num(v: Any) -> float | None:
@@ -58,8 +114,12 @@ def _num(v: Any) -> float | None:
 
 
 class TrackingResult(BaseModel):
-    """Common schema every adapter normalizes into."""
-    model_config = ConfigDict(coerce_numbers_to_str=True)
+    """Common schema every adapter normalizes into.
+
+    Extra keys from mapping.yaml `fields:` are kept (extra=allow) so a new carrier
+    field can be mapped through YAML into AddCarrierActivity without changing models.
+    """
+    model_config = ConfigDict(coerce_numbers_to_str=True, extra="allow")
     reference: str
     ref_type: str
     carrier_code: str
@@ -74,6 +134,9 @@ class TrackingResult(BaseModel):
     destination: str | None = None
     pieces: int | None = None
     weight: float | None = None
+    service_level: str | None = None
+    pod_name: str | None = None
+    pod_datetime: str | None = None
     events: list[TrackingEvent] = []
     scraped_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     raw: dict[str, Any] = {}

@@ -1,14 +1,26 @@
 log_level: INFO
+log_format: console   # console = readable lines; json = one JSON object per line
+logs_dir: logs
 state_db: state/tracker.db
 state_dir: state/browser
+debug_dir: state/debug
 clients_dir: app/clients
-schedule: {interval_minutes: 360, jitter_minutes: 25, seed: tracker}
+schedule: {interval_hours: 3, jitter_minutes: 25, seed: tracker}
 alerts: {webhook_url: null, dedupe_hours: 6}   # Teams/Slack incoming webhook
 backend:
-  mode: file            # switch to http once the API is live
-  base_url: https://backend.example.com/api
+  mode: http
+  base_url: https://plgtst.pegasuslogistics.com
   token_env: TRACKER_API_TOKEN
+  carrier_config_path: /api/orderentry/GetCarrierConfigurationDetails
+  shipments_path: /api/orderentry/GetCarrierShipmentDetails
+  carrier_config_method: GET
+  timeout_seconds: 30
+  retry_attempts: 3
+  auth_header: Authorization
+  auth_scheme: Bearer
   carriers_path: /carriers
   post_path: /tracking/bulk
+  carrier_activity_path: /api/orderentry/AddCarrierActivity
+  carrier_activity_auth: false   # AddCarrierActivity is unauthenticated on Pegasus
   stub_dir: stub
   outbox_dir: out
