@@ -192,7 +192,7 @@ class MappingConfig(_Strict):
 
 class CarrierSpec(_Strict):
     code: str
-    client: str
+    client: str = "default"  # populated from the backend carrier account at runtime
     name: str | None = None
     aliases: list[str] = Field(default_factory=list)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
@@ -234,7 +234,7 @@ class AppSettings(_Strict):
     """Application-only settings. Carrier URLs, credentials and cadence come from the backend API."""
     log_level: str = "INFO"
     log_format: Literal["console", "json"] = "console"
-    logs_dir: str = "app/runtime/logs"
+    logs_dir: str = "logs"
     browser_state_dir: str = "app/runtime/browser"
     debug_dir: str = "app/runtime/debug"
     backend: BackendSettings = Field(default_factory=BackendSettings)
@@ -264,7 +264,7 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
     return AppSettings(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         log_format=os.environ.get("LOG_FORMAT", "console"),
-        logs_dir=os.environ.get("LOGS_DIR", "app/runtime/logs"),
+        logs_dir=os.environ.get("LOGS_DIR", "logs"),
         browser_state_dir=os.environ.get("BROWSER_STATE_DIR", "app/runtime/browser"),
         debug_dir=os.environ.get("SCRAPER_DEBUG_DIR", "app/runtime/debug"),
         backend=backend,
@@ -291,8 +291,8 @@ class SpecResolver:
             try:
                 spec = CarrierSpec(**raw)
                 for alias in [code, *spec.aliases]:
+                    # Carrier behavior is global and reusable; it is not owned by a client.
                     self._by_code[alias.upper()] = spec
-                    self._specs[(spec.client.upper(), alias.upper())] = spec
             except Exception as exc:
                 self.errors.append(f"built-in profile {code}: {type(exc).__name__}: {exc}")
 
@@ -309,13 +309,20 @@ class SpecResolver:
             if delay is not None and float(delay) > 0:
                 site_updates["inter_pro_delay_s"] = max(spec.site.inter_pro_delay_s, float(delay))
         site = spec.site.model_copy(update=site_updates) if site_updates else spec.site
-        return spec.model_copy(update={"site": site})
+        # Client assignment is runtime data. Prefer the customer name supplied by the
+        # backend, falling back to bill-to when the backend does not provide one.
+        runtime_client = (
+            getattr(config, "customer_name", None) if config is not None else None
+        ) or str(bill_to or "default")
+        return spec.model_copy(update={"site": site, "client": str(runtime_client)})
 
     def clients(self) -> list[str]:
-        return sorted({spec.client for spec in self._by_code.values()})
+        """Return no static clients: client assignments are supplied by the backend."""
+        return []
 
     def carriers(self, client: str) -> list[str]:
-        return sorted({spec.code for spec in self._by_code.values() if spec.client.upper() == client.upper()})
+        """Return known carrier implementations; assignments are resolved per backend account."""
+        return sorted({spec.code for spec in self._by_code.values()})
 
 
 def load_resolver(clients_dir: str | Path | None = None) -> SpecResolver:

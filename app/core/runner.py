@@ -9,7 +9,7 @@ import uuid
 from app.core.batch_updates import enqueue_tracking_updates
 from app.core.diagnostics import log_environment_report, setup_asyncio_exception_handler
 from app.core.intake import build_jobs
-from app.core.scraper import BatchScraper
+from app.carriers.adapter_registry import carrier_adapter_registry
 from app.logging_setup import carrier_var, client_var, log, register_secret, run_file_logger, run_id_var
 from app.settings import CarrierSpec, SpecResolver
 
@@ -22,6 +22,7 @@ class Runner:
         self._run_lock = asyncio.Lock()
         self._last_run: dict[tuple[str, str, int], float] = {}  # process-local scheduler only
         self.last_results: list[dict] = []
+        self.last_log_file = None
 
     def _due(self, config, spec: CarrierSpec, force: bool) -> bool:
         if force:
@@ -40,6 +41,7 @@ class Runner:
             run_id = uuid.uuid4().hex[:12]
             run_id_var.set(run_id)
             with run_file_logger(run_id=run_id, logs_dir=self.sv.settings.logs_dir) as log_file:
+                self.last_log_file = log_file
                 logger.info("run started | run_id=%s log_file=%s", run_id, log_file)
                 try:
                     setup_asyncio_exception_handler(asyncio.get_running_loop(), logger)
@@ -109,7 +111,8 @@ class Runner:
             carrier_var.set(spec.code)
             provider = self.sv.provider_factory(spec.browser, self.sv.settings.browser_state_dir)
             try:
-                outcome = await BatchScraper(provider, spec, self.sv.settings.debug_dir).run_batch(jobs, spec)
+                adapter = carrier_adapter_registry.create(provider, spec, self.sv.settings.debug_dir)
+                outcome = await adapter.track_batch(jobs)
                 activity_stats = await enqueue_tracking_updates(
                     self.sv.settings, self.sv.backend, config, spec, run_id_var.get() or "", outcome, jobs)
                 label_key = f"{spec.client}/{spec.code}"

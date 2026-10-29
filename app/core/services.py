@@ -1,6 +1,6 @@
 """Dependencies shared by the runner; intentionally contains no persistence layer."""
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable, Any
 
 
 @dataclass

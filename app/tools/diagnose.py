@@ -69,7 +69,7 @@ async def run_diagnose(
     run_id = f"diag_{carrier_code.lower()}_{int(time.time())}"
     run_id_var.set(run_id)
 
-    diag_dir = Path("app/runtime/diagnostics")
+    diag_dir = Path("logs/diagnostics")
     log_file = setup_diagnose_logging(carrier_code, diag_dir)
     logger.info("diagnose tool started | carrier=%s log_file=%s", carrier_code, log_file)
 

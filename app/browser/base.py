@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 DEFAULT_BLOCK_MARKERS = ["just a moment", "verify you are human", "attention required", "cf-challenge",
                          "checking your browser", "access denied", "unusual traffic"]

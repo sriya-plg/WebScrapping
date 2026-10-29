@@ -15,7 +15,7 @@ from app.browser.session_utils import session_key
 from app.core.intervention import InterventionQueue
 from app.core.runner import Runner
 from app.core.services import Services
-from app.logging_setup import setup_logging
+from app.logging_setup import append_run_output, setup_logging
 from app.settings import load_resolver, load_settings
 
 logger = logging.getLogger("main")
@@ -141,7 +141,9 @@ async def _dispatch(args, settings, services, resolver, runner):
             result = await runner.run_once({v.upper() for v in args.carrier} if args.carrier else None,
                                            args.force,
                                            {v.upper() for v in args.client} if args.client else None)
-            print(result)
+            output = str(result)
+            print(output)
+            append_run_output(runner.last_log_file, output)
         elif args.cmd == "daemon":
             await daemon(settings, runner)
         else:

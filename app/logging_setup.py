@@ -95,6 +95,38 @@ class FlushFileHandler(logging.FileHandler):
             pass
 
 
+class StdoutTee:
+    """Mirror direct stdout writes to a run log without intercepting logger output."""
+
+    def __init__(self, stream, file_handler: FlushFileHandler):
+        self.stream = stream
+        self.file_handler = file_handler
+
+    def write(self, value: str) -> int:
+        written = self.stream.write(value)
+        try:
+            self.file_handler.acquire()
+            try:
+                if self.file_handler.stream is not None:
+                    self.file_handler.stream.write(value)
+                    self.file_handler.flush()
+            finally:
+                self.file_handler.release()
+        except Exception:
+            pass
+        return len(value) if written is None else written
+
+    def flush(self) -> None:
+        self.stream.flush()
+        try:
+            self.file_handler.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
 def setup_logging(level: str = "INFO", log_format: str = "console", logs_dir: str | Path = "logs") -> None:
     Path(logs_dir).mkdir(parents=True, exist_ok=True)
     h = logging.StreamHandler(sys.stdout)
@@ -136,6 +168,8 @@ def run_file_logger(run_id: str | None = None, logs_dir: str | Path = "logs", le
         root.setLevel(logging.INFO)
     root.addHandler(handler)
 
+    orig_stdout = sys.stdout
+    sys.stdout = StdoutTee(orig_stdout, handler)
     try:
         from app.core.diagnostics import install_exception_hooks, StderrTee
         install_exception_hooks(root)
@@ -155,6 +189,7 @@ def run_file_logger(run_id: str | None = None, logs_dir: str | Path = "logs", le
                 sys.stderr = orig_stderr
             except Exception:
                 pass
+        sys.stdout = orig_stdout
         try:
             handler.flush()
             root.removeHandler(handler)
@@ -162,6 +197,16 @@ def run_file_logger(run_id: str | None = None, logs_dir: str | Path = "logs", le
             root.setLevel(orig_root_level)
         except Exception:
             pass
+
+
+def append_run_output(log_file: str | Path | None, output: str) -> None:
+    """Append output emitted immediately after a run's logging context closes."""
+    if log_file is None:
+        return
+    with Path(log_file).open("a", encoding="utf-8") as stream:
+        stream.write(output)
+        if not output.endswith("\n"):
+            stream.write("\n")
 
 
 def log(logger: logging.Logger, level: int, msg: str, **fields) -> None:

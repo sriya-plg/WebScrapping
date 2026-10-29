@@ -15,6 +15,8 @@ from app.core.scrape_log import log_scrape_and_tms
 from app.core.scraper import ScrapeBatchResult
 from app.logging_setup import log
 from app.models import CarrierAccount, CarrierConfig, TrackingJob, TrackingResult
+from app.domain.job_context import JobContext
+from app.clients.registry import client_policy_registry
 from app.settings import ActivityConfig, CarrierSpec
 
 logger = logging.getLogger(__name__)
@@ -154,13 +156,17 @@ def _activity_ctx(
     ml_error: str,
     preserve_pod_datetime: bool = False,
 ) -> dict[str, Any]:
-    bill_to = job.carrier.bill_to
+    context = JobContext.from_carrier_config(job.carrier)
+    bill_to = context.bill_to
     try:
         bill_to = int(bill_to)
     except (TypeError, ValueError):
         pass
     pod_name, pod_dt = _pod_from_result(result)
     return {
+        "client_id": context.client_id,
+        "client_name": context.client_name,
+        "account_id": context.account_id,
         "housebill": str(job.shipment.housebill or ""),
         "pro_number": str(job.shipment.pro_number or job.search_value or ""),
         "carrier_code": str(job.carrier.carrier_code or ""),
@@ -220,13 +226,19 @@ def build_add_carrier_activity(
     data["reference"] = get_path(data, "reference") or ctx["reference"]
 
     payload = apply_map(data, activity.payload_map)
-    if payload.get("billTo") in (None, ""):
-        payload["billTo"] = ctx["bill_to"]
-    else:
-        try:
-            payload["billTo"] = int(payload["billTo"])
-        except (TypeError, ValueError):
-            payload["billTo"] = ctx["bill_to"]
+    # Optional client policy runs after the standard payload has been built. The
+    # policy key is runtime client identity; default behavior changes nothing.
+    context = JobContext.from_carrier_config(job.carrier)
+    policy = client_policy_registry.create(context.client_id)
+    payload = policy.customize_payload(payload, context)
+    if not isinstance(payload, dict):
+        raise TypeError("client policy customize_payload() must return a dictionary")
+    # BillTo is an intake/account identity, not a carrier-mapped field or client
+    # policy override. Always force the value from this exact backend account job.
+    try:
+        payload["billTo"] = int(context.bill_to)
+    except (TypeError, ValueError):
+        payload["billTo"] = context.bill_to
     if not payload.get("carrierCode"):
         payload["carrierCode"] = ctx["carrier_code"]
     if not payload.get("housebill"):
