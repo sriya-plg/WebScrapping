@@ -1,15 +1,15 @@
 """Structured JSON logs with secret redaction (registered secrets + key=value patterns)."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 import contextvars
 import json
 import logging
-from pathlib import Path
 import re
 import sys
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 run_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("run_id", default="-")
 carrier_var: contextvars.ContextVar[str] = contextvars.ContextVar("carrier", default="-")
@@ -171,7 +171,7 @@ def run_file_logger(run_id: str | None = None, logs_dir: str | Path = "logs", le
     orig_stdout = sys.stdout
     sys.stdout = StdoutTee(orig_stdout, handler)
     try:
-        from app.core.diagnostics import install_exception_hooks, StderrTee
+        from app.core.diagnostics import StderrTee, install_exception_hooks
         install_exception_hooks(root)
         orig_stderr = sys.stderr
         sys.stderr = StderrTee(orig_stderr, lambda msg: root.error("stderr | %s", msg))

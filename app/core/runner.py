@@ -6,11 +6,18 @@ import logging
 import time
 import uuid
 
+from app.carriers.adapter_registry import carrier_adapter_registry
 from app.core.batch_updates import enqueue_tracking_updates
 from app.core.diagnostics import log_environment_report, setup_asyncio_exception_handler
 from app.core.intake import build_jobs
-from app.carriers.adapter_registry import carrier_adapter_registry
-from app.logging_setup import carrier_var, client_var, log, register_secret, run_file_logger, run_id_var
+from app.logging_setup import (
+    carrier_var,
+    client_var,
+    log,
+    register_secret,
+    run_file_logger,
+    run_id_var,
+)
 from app.settings import CarrierSpec, SpecResolver
 
 logger = logging.getLogger(__name__)
