@@ -1,4 +1,4 @@
-"""Carrier JSON -> TrackingResult -> AddCarrierActivity, driven by mapping.yaml / client.yaml."""
+"""Carrier JSON -> TrackingResult -> AddCarrierActivity, driven by built-in Python profiles."""
 from __future__ import annotations
 
 import json
@@ -100,7 +100,7 @@ def test_full_details_become_add_carrier_activity_payload():
     assert ev["long"] == 0
 
 
-def test_yaml_payload_map_override_is_respected():
+def test_profile_payload_map_override_is_respected():
     spec = SAIA.model_copy(deep=True)
     spec.activity.payload_map["serviceLevel"] = "=STD"
     result = normalize(spec, FULL, "77137570910", "PRO", ACCT)
@@ -278,7 +278,7 @@ def test_estes_movement_history_maps_to_add_carrier_activity():
     assert payload["carrierCode"] == "ESTE03"
     assert payload["reference"] == "1848718241"
     assert payload["podName"] == "Seth"
-    # POD times retain the existing Pegasus local clock-time behavior.
+    # POD times retain the existing backend local clock-time behavior.
     assert payload["podDateTime"] == "2026-10-07T13:01:59Z"
     assert [ev["code"] for ev in payload["events"]] == [
         "Pickup Location Serviced", "Actual Pickup",
@@ -477,9 +477,9 @@ def test_time_offset_stripped_without_conversion():
     # Composition via compose_value
     assert compose_value(obj, "{deliveryDate}T{deliveryTime}") == "2026-10-07T15:18:00"
 
-    # pegasus_datetime preserves 15:18:00 without UTC conversion
-    from app.core.carrier_activity import pegasus_datetime
-    assert pegasus_datetime("15:18:00-05:00", fallback=datetime(2026, 10, 7, tzinfo=timezone.utc)) == "2026-10-07T15:18:00Z"
-    assert pegasus_datetime("15:18:00", fallback=datetime(2026, 10, 7, tzinfo=timezone.utc)) == "2026-10-07T15:18:00Z"
-    assert pegasus_datetime("2026-10-07T15:18:00") == "2026-10-07T15:18:00Z"
+    # backend_datetime preserves 15:18:00 without UTC conversion
+    from app.core.carrier_activity import backend_datetime
+    assert backend_datetime("15:18:00-05:00", fallback=datetime(2026, 10, 7, tzinfo=timezone.utc)) == "2026-10-07T15:18:00Z"
+    assert backend_datetime("15:18:00", fallback=datetime(2026, 10, 7, tzinfo=timezone.utc)) == "2026-10-07T15:18:00Z"
+    assert backend_datetime("2026-10-07T15:18:00") == "2026-10-07T15:18:00Z"
 

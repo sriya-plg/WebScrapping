@@ -3,8 +3,8 @@ from datetime import datetime, timezone
 
 from app.core.carrier_activity import (
     build_add_carrier_activity,
-    pegasus_datetime,
-    pegasus_ml_status,
+    backend_datetime,
+    backend_ml_status,
     post_scrape_activities,
 )
 from app.core.scraper import ScrapeBatchResult
@@ -49,9 +49,9 @@ def test_event_code_is_capped_at_50_characters():
     assert payload["events"][0]["code"] == long_status[:50]
 
 
-def test_pegasus_datetime_format():
-    assert pegasus_datetime("2026-10-11T07:22:20.874Z") == "2026-10-11T07:22:20Z"
-    assert pegasus_datetime(datetime(2026, 10, 11, 7, 22, 20, tzinfo=timezone.utc)) == "2026-10-11T07:22:20Z"
+def test_backend_datetime_format():
+    assert backend_datetime("2026-10-11T07:22:20.874Z") == "2026-10-11T07:22:20Z"
+    assert backend_datetime(datetime(2026, 10, 11, 7, 22, 20, tzinfo=timezone.utc)) == "2026-10-11T07:22:20Z"
 
 
 def test_build_add_carrier_activity_shape():
@@ -142,14 +142,14 @@ def test_post_logs_scrape_capture_and_tms_payload(caplog):
     assert '"housebill": "H1"' in text
 
 
-def test_pegasus_ml_status_maps_outcomes():
+def test_backend_ml_status_maps_outcomes():
     spec = make_spec("single_batch", batch_size=1)
-    assert pegasus_ml_status(spec, "ok") == 3
-    assert pegasus_ml_status(spec, "not_found") == 4
-    assert pegasus_ml_status(spec, "no_response") == 4
-    assert pegasus_ml_status(spec, "map_failed") == 4
-    assert pegasus_ml_status(spec, "error") == 4
-    assert pegasus_ml_status(spec, "unexpected_outcome") == 4
+    assert backend_ml_status(spec, "ok") == 3
+    assert backend_ml_status(spec, "not_found") == 4
+    assert backend_ml_status(spec, "no_response") == 4
+    assert backend_ml_status(spec, "map_failed") == 4
+    assert backend_ml_status(spec, "error") == 4
+    assert backend_ml_status(spec, "unexpected_outcome") == 4
 
 
 def test_bill_to_not_overwritten_by_tracking_result():

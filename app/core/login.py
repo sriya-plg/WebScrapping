@@ -1,6 +1,6 @@
 """Unified carrier portal login orchestration.
 
-Single source of truth for both BatchScraper and CarrierAdapter subclasses.
+Shared login helper used by the batch scraper.
 Handles modal and page-based login, credentials verification, MFA detection,
 login failure detection, session state persistence, and post-login tracking verification.
 Never logs credentials or secret values.

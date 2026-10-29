@@ -1,13 +1,9 @@
-"""Composition root + CLI.
-  python -m app.main run-once [--client calix] [--carrier estes] [--force] [--dry-run]
-  python -m app.main daemon
-  python -m app.main assist saia --client calix     # headed browser: solve the challenge once; cookies are saved"""
+"""Application entry point. Carrier runtime configuration is fetched from the backend API."""
 from __future__ import annotations
 
 import argparse
 import asyncio
 import logging
-import math
 import os
 import signal
 import time
@@ -15,194 +11,170 @@ from datetime import datetime, timedelta
 
 from app.backend.client import make_backend
 from app.browser.factory import make_provider
-from app.core import registry
-from app.core.adapter import session_key
+from app.browser.session_utils import session_key
 from app.core.intervention import InterventionQueue
-from app.core.job import Services
 from app.core.runner import Runner
-from app.core.state import StateStore
+from app.core.services import Services
 from app.logging_setup import setup_logging
 from app.settings import load_resolver, load_settings
 
 logger = logging.getLogger("main")
 
 
-def build(args):
-    s = load_settings(args.config)
-    s.dry_run = s.dry_run or getattr(args, "dry_run", False)
-    setup_logging(s.log_level, s.log_format, s.logs_dir)
-    for e in registry.discover():
-        logger.error("adapter import failed: %s", e)
-    store = StateStore(s.state_db)
-    resolver = load_resolver(s.clients_dir)
-    sv = Services(s, make_backend(s.backend), store, InterventionQueue(store, s.alerts), make_provider)
-    return s, sv, resolver, Runner(sv, resolver)
+def build(args=None):
+    settings = load_settings()
+    settings.dry_run = settings.dry_run or bool(getattr(args, "dry_run", False))
+    setup_logging(settings.log_level, settings.log_format, settings.logs_dir)
+    resolver = load_resolver()
+    for error in resolver.errors:
+        logger.error("built-in carrier profile failed validation: %s", error)
+    backend = make_backend(settings.backend)
+    services = Services(settings, backend, InterventionQueue(settings.alerts), make_provider)
+    return settings, services, resolver, Runner(services, resolver)
 
 
-async def assist(s, sv, resolver, code: str, client: str):
-    spec = resolver.resolve(client, code)
+async def assist(settings, services, resolver, code: str, client: str | None = None):
+    """Open the backend-provided tracking URL in a headed browser for manual challenge handling."""
+    configs = await services.backend.get_carrier_configs()
+    target = code.strip().upper()
+    def matches(config):
+        candidate = resolver.resolve(str(config.bill_to), config.carrier_code, config)
+        return bool(candidate and target in {candidate.code.upper(), config.carrier_code.upper(),
+                                              *(alias.upper() for alias in candidate.aliases)})
+    config = next((c for c in configs if matches(c)), None)
+    if config is None:
+        raise SystemExit(f"carrier configuration {code!r} was not returned by the backend")
+    spec = resolver.resolve(str(config.bill_to), config.carrier_code, config=config)
     if spec is None:
-        raise SystemExit(f"{client}/{code} is not configured")
-    url = spec.site.tracking_url
-    if not url:
-        accounts = await sv.backend.get_carrier_accounts()
-        url = next((a.tracking_url for a in accounts if a.bill_to.upper() == client.upper()
-                    and a.carrier_code.upper() in (spec.code, *[x.upper() for x in spec.aliases])), None)
-    if not url:
-        raise SystemExit("no tracking URL found (backend trackingUrl / site.tracking_url)")
-    provider = make_provider(spec.browser.model_copy(update={"headless": False}), s.state_dir)
-    sess = await provider.open_session(session_key(spec))      # SAME key the adapter uses
-    await sess.goto(url)
-    await asyncio.get_running_loop().run_in_executor(None, input, "Solve the challenge in the browser, then press Enter... ")
-    await sess.close()
-    await provider.close()
-    sv.store.resolve_interventions(spec.client, spec.code)
-    print("session saved; the next run reuses it and the intervention queue was cleared.")
+        raise SystemExit(f"no built-in browser profile for carrier {config.carrier_code!r}")
+    if client and client.strip().casefold() not in {spec.client.casefold(), str(config.bill_to).casefold(),
+                                                    (config.customer_name or "").casefold()}:
+        raise SystemExit("the selected carrier does not match the requested client/billTo")
+    if not config.tracking_url:
+        raise SystemExit("backend carrier configuration has no trackingUrl")
+    provider = make_provider(spec.browser.model_copy(update={"headless": False}), settings.browser_state_dir)
+    session = None
+    try:
+        session = await provider.open_session(session_key(spec))
+        await session.goto(config.tracking_url)
+        await asyncio.get_running_loop().run_in_executor(None, input,
+            "Complete any carrier challenge in the browser, then press Enter to close... ")
+        await session.save_state()
+    finally:
+        if session is not None:
+            await session.close()
+        await provider.close()
 
 
-def _read_interval_seconds() -> tuple[float, float]:
-    """RUN_INTERVAL_HOURS (default 3) -> (hours, seconds). Must be a positive finite number."""
-    hours = float(os.environ.get("RUN_INTERVAL_HOURS", "3"))
-    if not math.isfinite(hours) or hours <= 0:
-        raise ValueError("RUN_INTERVAL_HOURS must be a positive finite number")
-    return hours, hours * 3600
-
-
-def _read_run_timeout_seconds() -> float | None:
-    """Optional RUN_TIMEOUT_HOURS. Unset, empty or 0 means no per-run timeout."""
-    raw = (os.environ.get("RUN_TIMEOUT_HOURS") or "").strip()
-    if not raw:
-        return None
-    hours = float(raw)
-    if not math.isfinite(hours) or hours < 0:
-        raise ValueError("RUN_TIMEOUT_HOURS must be a non-negative finite number")
-    return hours * 3600 if hours > 0 else None
-
-
-async def daemon(s, runner, store):
-    interval_hours, interval_seconds = _read_interval_seconds()
-    run_timeout_s = _read_run_timeout_seconds()
+async def daemon(settings, runner):
+    interval_hours = float(os.environ.get("RUN_INTERVAL_HOURS", settings.schedule.interval_hours))
+    if interval_hours <= 0:
+        raise ValueError("RUN_INTERVAL_HOURS must be positive")
+    interval_seconds = interval_hours * 3600
+    raw_timeout = os.environ.get("RUN_TIMEOUT_HOURS", "").strip()
+    timeout_s = float(raw_timeout) * 3600 if raw_timeout else None
+    if timeout_s is not None and timeout_s <= 0:
+        timeout_s = None
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
-    previous_handlers = {}
-    state = {"stop_requests": 0, "run_task": None}
+    stopping = {"count": 0, "task": None}
 
-    def on_stop_request():
-        """Runs on the event loop (not inside the signal handler), so logging is safe here."""
-        state["stop_requests"] += 1
+    def request_stop():
+        stopping["count"] += 1
         stop_event.set()
-        task = state["run_task"]
-        running = task is not None and not task.done()
-        if state["stop_requests"] == 1:
-            if running:
-                logger.info("shutdown requested; finishing the current run "
-                            "(press Ctrl+C again to cancel it immediately)")
-            else:
-                logger.info("shutdown requested")
-        elif running:
-            logger.warning("second shutdown request; cancelling the current run")
+        task = stopping["task"]
+        if stopping["count"] > 1 and task and not task.done():
             task.cancel()
 
-    def request_stop(_signum, _frame):
-        loop.call_soon_threadsafe(on_stop_request)
+    previous = {}
+    def handler(_signum, _frame):
+        loop.call_soon_threadsafe(request_stop)
 
-    signals = [signal.SIGINT]
-    if hasattr(signal, "SIGTERM"):
-        signals.append(signal.SIGTERM)
-
+    for sig in (signal.SIGINT, getattr(signal, "SIGTERM", None)):
+        if sig is not None:
+            try:
+                previous[sig] = signal.signal(sig, handler)
+            except (OSError, ValueError):
+                pass
+    logger.info("daemon started | interval_hours=%s", interval_hours)
     try:
-        for signum in signals:
-            try:
-                previous_handlers[signum] = signal.signal(signum, request_stop)
-            except (OSError, ValueError) as exc:
-                logger.warning("could not register shutdown signal %s: %s", signum, exc)
-
-        logger.info("daemon started, running first job now (interval_hours=%s, run_timeout=%s)",
-                    interval_hours, f"{run_timeout_s / 3600:g}h" if run_timeout_s else "none")
         while not stop_event.is_set():
-            run_started = time.monotonic()
-            run_task = asyncio.create_task(runner.run_once())
-            state["run_task"] = run_task
+            started = time.monotonic()
+            task = asyncio.create_task(runner.run_once())
+            stopping["task"] = task
             try:
-                done, _ = await asyncio.wait({run_task}, timeout=run_timeout_s)
-                if done:
-                    run_task.result()          # re-raises a crash from the run, if any
+                if timeout_s:
+                    await asyncio.wait_for(task, timeout=timeout_s)
                 else:
-                    logger.error("run exceeded RUN_TIMEOUT_HOURS (%.1f hours); cancelling it, daemon continues",
-                                 run_timeout_s / 3600)
-                    run_task.cancel()
-                    await asyncio.gather(run_task, return_exceptions=True)
+                    await task
+            except asyncio.TimeoutError:
+                logger.error("run exceeded timeout; cancelling it")
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             except asyncio.CancelledError:
-                if state["stop_requests"] >= 2:
-                    logger.warning("run cancelled by second shutdown request")
+                if stopping["count"] > 1:
                     break
                 raise
             except Exception:
-                logger.exception("run crashed; daemon continues")
+                logger.exception("run failed; daemon will continue")
             finally:
-                if not run_task.done():
-                    run_task.cancel()
-                state["run_task"] = None
-
-            run_finished = time.monotonic()
-            duration = run_finished - run_started
+                stopping["task"] = None
+            remaining = max(0, started + interval_seconds - time.monotonic())
             if stop_event.is_set():
-                logger.info("run finished in %.1f seconds; shutdown requested, no next run scheduled", duration)
                 break
-
-            remaining = max(0.0, run_started + interval_seconds - run_finished)
-            next_run_at = datetime.now().astimezone() + timedelta(seconds=remaining)
-            logger.info("run finished in %.1f seconds, next run at %s",
-                        duration, next_run_at.strftime("%Y-%m-%d %H:%M:%S %Z"))
-            logger.info("daemon sleeping for %.1f seconds", remaining)
-
-            if remaining == 0:
-                await asyncio.sleep(0)
-                continue
-
+            next_at = datetime.now().astimezone() + timedelta(seconds=remaining)
+            logger.info("next run at %s; sleeping %.1f seconds", next_at.strftime("%Y-%m-%d %H:%M:%S %Z"), remaining)
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=remaining)
-                logger.info("daemon shutdown requested while waiting")
             except asyncio.TimeoutError:
-                continue
-            break
+                pass
     finally:
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
+        for sig, old_handler in previous.items():
+            signal.signal(sig, old_handler)
         logger.info("daemon stopped")
 
 
+async def _dispatch(args, settings, services, resolver, runner):
+    try:
+        if args.cmd == "run-once":
+            result = await runner.run_once({v.upper() for v in args.carrier} if args.carrier else None,
+                                           args.force,
+                                           {v.upper() for v in args.client} if args.client else None)
+            print(result)
+        elif args.cmd == "daemon":
+            await daemon(settings, runner)
+        else:
+            await assist(settings, services, resolver, args.carrier, args.client)
+    finally:
+        close = getattr(services.backend, "close", None)
+        if close:
+            await close()
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config/app.yaml")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run-once")
-    r.add_argument("--client", action="append", help="client key or billTo, e.g. calix")
-    r.add_argument("--carrier", action="append")
-    r.add_argument("--force", action="store_true")
-    r.add_argument("--dry-run", action="store_true")
-    r.add_argument("--headless", action="store_true", default=None, help="Force headless browser mode")
-    r.add_argument("--headed", action="store_true", default=None, help="Force headed browser mode")
-    d = sub.add_parser("daemon")
-    d.add_argument("--headless", action="store_true", default=None, help="Force headless browser mode")
-    d.add_argument("--headed", action="store_true", default=None, help="Force headed browser mode")
-    a = sub.add_parser("assist")
+    parser = argparse.ArgumentParser(description="Backend-driven freight tracking scraper")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    once = sub.add_parser("run-once", help="fetch backend shipments, scrape, and post results")
+    once.add_argument("--client", action="append", help="client name or billTo")
+    once.add_argument("--carrier", action="append", help="carrier code or built-in alias")
+    once.add_argument("--force", action="store_true", help="ignore process-local frequency schedule")
+    once.add_argument("--dry-run", action="store_true", help="do not post tracking updates")
+    once.add_argument("--headless", action="store_true", default=None)
+    once.add_argument("--headed", action="store_true", default=None)
+    d = sub.add_parser("daemon", help="run recurring backend-driven scrape cycles")
+    d.add_argument("--headless", action="store_true", default=None)
+    d.add_argument("--headed", action="store_true", default=None)
+    a = sub.add_parser("assist", help="open a carrier website for manual challenge handling")
     a.add_argument("carrier")
-    a.add_argument("--client", required=True)
-    args = ap.parse_args()
+    a.add_argument("--client", help="optional client name or billTo")
+    args = parser.parse_args()
     if getattr(args, "headless", None):
         os.environ["BROWSER_HEADLESS"] = "true"
     elif getattr(args, "headed", None):
         os.environ["BROWSER_HEADLESS"] = "false"
-    s, sv, resolver, runner = build(args)
-    if args.cmd == "run-once":
-        asyncio.run(runner.run_once({c.upper() for c in args.carrier} if args.carrier else None, args.force,
-                                    {c.upper() for c in args.client} if args.client else None))
-    elif args.cmd == "daemon":
-        asyncio.run(daemon(s, runner, sv.store))
-    else:
-        asyncio.run(assist(s, sv, resolver, args.carrier, args.client))
+    settings, services, resolver, runner = build(args)
+    asyncio.run(_dispatch(args, settings, services, resolver, runner))
 
 
 if __name__ == "__main__":

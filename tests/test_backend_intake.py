@@ -106,13 +106,15 @@ def test_config_and_shipments_filter_empty_and_duplicate_pro():
     client = backend(handler)
     async def run():
         try:
-            accounts = await client.get_carrier_accounts()
-            assert len([a for a in accounts if a.is_active]) == 1
-            assert "secret-password" not in repr(accounts[0])
-            batch = await client.get_pending(accounts[0], type("Spec", (), {"code": "SAI001"})())
-            assert [r.reference for r in batch.refs] == ["p1"]
+            configs = await client.get_carrier_configs()
+            assert len([c for c in configs if c.is_active]) == 1
+            assert "secret-password" not in repr(configs[0])
+            jobs_by_customer = await build_jobs(client)
+            jobs = jobs_by_customer["Client"]["SAI001"]
+            assert [job.search_value for job in jobs] == ["p1"]
         finally:
             await client.http.aclose()
+            await client.http_activity.aclose()
     asyncio.run(run())
 
 
@@ -123,7 +125,7 @@ def test_retries_503_then_succeeds_and_password_not_logged(caplog):
         calls += 1
         return httpx.Response(503 if calls < 2 else 200, json=[])
     client = backend(handler)
-    client.s.retry_attempts = 2
+    client.settings.retry_attempts = 2
     async def run():
         try:
             assert await client.get_carrier_configs() == []
@@ -138,7 +140,7 @@ def test_retries_503_then_succeeds_and_password_not_logged(caplog):
 
 def test_final_503_is_typed_unavailable():
     client = backend(lambda request: httpx.Response(503))
-    client.s.retry_attempts = 1
+    client.settings.retry_attempts = 1
     async def run():
         try:
             with pytest.raises(BackendUnavailable):
@@ -180,13 +182,14 @@ def test_http_backend_credential_decryption_with_fernet(monkeypatch):
     client = backend(lambda request: httpx.Response(200, json=[encrypted_config]))
     async def run():
         try:
-            accounts = await client.get_carrier_accounts()
-            assert len(accounts) == 1
-            account = accounts[0]
-            assert account.password is not None
-            assert account.password.get_secret_value() == plain_pass
+            configs = await client.get_carrier_configs()
+            assert len(configs) == 1
+            config = configs[0]
+            assert config.password is not None
+            assert config.password.get_secret_value() == plain_pass
             # Confirm SecretStr redaction in repr
-            assert plain_pass not in repr(account)
+            assert plain_pass not in repr(config)
         finally:
             await client.http.aclose()
+            await client.http_activity.aclose()
     asyncio.run(run())

@@ -29,7 +29,7 @@ htmlcov/
 coverage.xml
 
 # Application-generated files
-app/logs/
+app/runtime/
 
 # Editors and operating systems
 .vscode/
@@ -38,4 +38,3 @@ app/logs/
 logs/
 
 .playwright-mcp/
-state/

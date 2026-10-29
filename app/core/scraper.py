@@ -15,7 +15,7 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.browser.base import BrowserProvider, BrowserSession, CapturedResponse
-from app.core.adapter import DEFAULT_CONSENT_SELECTORS, session_key
+from app.browser.session_utils import DEFAULT_CONSENT_SELECTORS, session_key
 from app.core.diagnostics import check_block_page, save_failure_artifacts, traced_step
 from app.core.login import execute_login
 from app.core.mapper import get_path
@@ -217,7 +217,7 @@ def _response_url_without_query(url: str) -> str:
 
 class BatchScraper:
     def __init__(self, provider: BrowserProvider, spec: CarrierSpec | None = None,
-                 debug_dir: str = "state/debug"):
+                 debug_dir: str = "app/runtime/debug"):
         self.provider, self.spec = provider, spec
         self.debug_dir = Path(debug_dir)
         self._diagnostic_index = 0
@@ -969,7 +969,6 @@ class BatchScraper:
 
         deadline = asyncio.get_running_loop().time() + 10.0
         while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(0.4)
             try:
                 if page is not None:
                     if await page.frame_locator(anchor_frame).locator(checked_selector).is_visible():
@@ -993,30 +992,15 @@ class BatchScraper:
                     return false;
                 }"""))
                 if challenge:
-                    use_browser_use = (
-                        os.environ.get("USE_BROWSER_USE_CAPTCHA", "").lower() in ("1", "true", "yes")
-                        or bool((spec.site.extra or {}).get("use_browser_use_captcha"))
-                        or spec.browser.provider == "browser_use"
-                    )
-                    if use_browser_use:
-                        try:
-                            from app.browser.browser_use_captcha import solve_captcha_with_browser_use
-                            bu_timeout = float((spec.site.extra or {}).get("browser_use_timeout_s", 60.0))
-                            logger.info("reCAPTCHA challenge detected; delegating resolution to Browser Use on active Playwright page...")
-                            resolved = await solve_captcha_with_browser_use(session, spec, timeout_s=bu_timeout)
-                            if resolved:
-                                logger.info(
-                                    "reCAPTCHA challenge resolved by Browser Use for %s; saving session state and resuming Playwright workflow",
-                                    spec.code
-                                )
-                                await session.save_state()
-                                await asyncio.sleep(0.5)
-                                return
-                        except Exception as bu_exc:
-                            logger.warning("Browser Use CAPTCHA attempt failed: %s; falling back to assist mode", bu_exc)
-
-                    is_headed = not spec.browser.headless or os.environ.get("BROWSER_HEADLESS", "").lower() in ("0", "false")
-                    assist_mode = is_headed or os.environ.get("SCRAPER_ASSIST", "").lower() in ("1", "true", "yes") or bool((spec.site.extra or {}).get("interactive_challenge_assist"))
+                    headless_override = os.environ.get("BROWSER_HEADLESS") or os.environ.get("HEADLESS")
+                    if headless_override is not None:
+                        actual_headless = headless_override.lower() in ("1", "true", "yes")
+                    elif os.name == "posix" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+                        actual_headless = True
+                    else:
+                        actual_headless = spec.browser.headless
+                    is_headed = not actual_headless
+                    assist_mode = is_headed or os.environ.get("SCRAPER_ASSIST", "").lower() in ("1", "true", "yes")
                     if assist_mode:
                         assist_timeout = float((spec.site.extra or {}).get("challenge_assist_wait_s", spec.site.challenge_wait_s or 60.0))
                         logger.info(
@@ -1060,7 +1044,7 @@ class BatchScraper:
                 raise
             except Exception as loop_exc:
                 logger.debug("reCAPTCHA poll exception: %s", loop_exc)
-                pass
+            await asyncio.sleep(0.4)
 
     @staticmethod
     def _safe_error(exc: Exception, secrets: list[str]) -> str:

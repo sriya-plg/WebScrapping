@@ -27,7 +27,7 @@ class CarrierConfig(BaseModel):
 
 
 class ShipmentRef(BaseModel):
-    """Row from GetCarrierShipmentDetails (Pegasus order entry)."""
+    """Row from the backend shipment-intake API."""
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
     housebill: str
     pro_number: str = Field(alias="proNumber")
@@ -68,7 +68,7 @@ class CarrierAccount(BaseModel):
     tracking_url: str | None = Field(None, alias="trackingUrl")
     bill_to: str = Field(alias="billTo")
     customer_name: str | None = Field(None, alias="customerName")
-    processing_frequency: float | None = Field(None, alias="processingFrequency")  # ASSUMED: hours
+    processing_frequency: float | None = Field(None, alias="processingFrequency")  # minutes; 0 means every cycle
     processing_delay: float | None = Field(None, alias="processingDelay")          # ASSUMED: seconds between refs
     user_name: str | None = Field(None, alias="userName")
     password: SecretStr | None = None
@@ -80,18 +80,18 @@ class CarrierAccount(BaseModel):
 class PendingRef(BaseModel):
     reference: str            # the PRO / BOL / housebill value
     ref_type: str             # PRO | BOL | ... (the "search by" column)
-    meta: dict[str, Any] = {}  # anything else the backend returned for this row (echoed into ctx)
+    meta: dict[str, Any] = Field(default_factory=dict)  # backend metadata echoed into ctx
 
 
 class PendingBatch(BaseModel):
     bill_to: str
     carrier_code: str
     search_by: str
-    refs: list[PendingRef]
+    refs: list[PendingRef] = Field(default_factory=list)
 
 
 class TrackingEvent(BaseModel):
-    """Canonical event. Extra keys from mapping.yaml are kept (extra=allow) so new
+    """Canonical event. Extra keys from built-in carrier profile are kept (extra=allow) so new
     carrier fields can be mapped to the backend payload without a code change."""
     model_config = ConfigDict(coerce_numbers_to_str=True, extra="allow")
     timestamp: str | None = None
@@ -116,7 +116,7 @@ def _num(v: Any) -> float | None:
 class TrackingResult(BaseModel):
     """Common schema every adapter normalizes into.
 
-    Extra keys from mapping.yaml `fields:` are kept (extra=allow) so a new carrier
+    Extra keys from built-in carrier profile `fields:` are kept (extra=allow) so a new carrier
     field can be mapped through YAML into AddCarrierActivity without changing models.
     """
     model_config = ConfigDict(coerce_numbers_to_str=True, extra="allow")
@@ -137,10 +137,10 @@ class TrackingResult(BaseModel):
     service_level: str | None = None
     pod_name: str | None = None
     pod_datetime: str | None = None
-    events: list[TrackingEvent] = []
+    events: list[TrackingEvent] = Field(default_factory=list)
     scraped_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    raw: dict[str, Any] = {}
-    notes: list[str] = []      # what was auto-detected / inferred (visible in probe + logs, not in payload)
+    raw: dict[str, Any] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)  # auto-detected/inferred notes; not in payload
 
     @field_validator("weight", mode="before")
     @classmethod

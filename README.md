@@ -1,116 +1,79 @@
-# Freight tracker -- everything for a client lives in ONE folder
+# Backend-driven freight tracking scraper
 
-```
-app/clients/calix/
-  client.yaml                      billTo codes + settings shared by all Calix carriers
-                                   (pending-housebills API shape, backend payload keys, default limits)
-  carriers/
-    estes/      config.yaml        selectors, response regex, field paths, status map, browser, limits
-                adapter.py         how to track on this site (authenticate / track)
-                hooks.py           optional payload tweaks (auto-used if present)
-    saia/       (same 3 files)
-    forwardair/ (same 3 files)
-app/core/      shared engine (runner, scheduler, retries, breaker, adapter base, state, alerts)
-app/browser/   BrowserProvider (playwright_stealth | patchright | crawl4ai stub)
-app/backend/   backend API client (+ local-JSON stub)
-```
-Resolution: backend record (billTo, carrierCode) -> client folder (by billTo in client.yaml)
--> carriers/<carrierCode>/ ; settings = client.yaml `defaults` overridden by the carrier's config.yaml.
-Folder name = carrier code (aliases in config.yaml). Adapters are auto-discovered by folder; no registration.
-A carrier with no folder under the client is not processed (logged as not_configured).
-Rate limits / circuit breaker are shared per carrier site across clients; cookie profiles, metrics and alerts are per client+carrier.
+The application fetches carrier configuration and shipment references from the backend, drives each carrier's tracking website with Playwright/Patchright, captures the website's JSON network responses, maps the payload, and sends the result to the backend's `AddCarrierActivity` API.
 
-New client:   python scripts/new_client.py acme ACME01 "Acme"
-New carrier:  python scripts/new_carrier.py calix forwardair "Forward Air"   (then fill TODOs in config.yaml)
+## Architecture
 
-Run:
-  python -m app.main run-once --dry-run --force [--client calix] [--carrier estes]
-  python -m app.main daemon
-  python -m app.main assist saia --client calix
-Saia on a server: xvfb-run -a python -m app.main daemon
+1. **Carrier configuration API** supplies `carrierCode`, `trackingUrl`, `billTo`, credentials, `isActive`, `processingFrequency`, and `processingDelay`.
+2. **Shipment API** supplies housebills, PRO numbers, and metadata.
+3. **Built-in carrier profiles** in `app/carrier_profiles.py` hold only stable carrier-specific browser selectors, network response patterns, mapping rules, and safe interaction pacing. They do not override URLs or schedule values from the API.
+4. **Playwright/Patchright** opens the real tracking page and listens for JSON network responses. Carrier groups are processed sequentially so only one browser lifecycle runs at a time. It does not replace network response capture with HTML scraping.
+5. **Mapping and delivery** normalize the captured JSON and post one `AddCarrierActivity` update per shipment row. The backend decides whether a result is new, changed, or already processed.
 
-## Backend shipment intake
+There is **no database** and no local shipment deduplication. Processing-frequency bookkeeping is in memory only and resets on restart. The backend remains authoritative for result status and duplicate detection. Browser storage-state JSON files may be retained under `app/runtime/browser/` so verified sessions/cookies can be reused; these are browser session files, not a database. Keep that directory private because it may contain authenticated browser state.
 
-At each `run-once` start, `HttpBackend` reads carrier configurations, filters inactive
-entries, then requests pending shipments once for each configured `(billTo, carrierCode)`.
-The existing runner hands those references to the existing carrier adapters:
+## Browser engine choice
 
-`6-hour jittered scheduler -> carrier configuration API -> shipment API per carrier -> BatchScraper -> raw response batches`
+- **Playwright stealth** is the default: it supports page automation and network response listeners used by the scraper.
+- **Patchright** is retained for Saia and Forward Air profiles where the existing configuration calls for it.
+- **Crawl4AI is not used**: the former provider was only a stub and does not implement the current browser-session/network-listener contract.
+- CAPTCHA image challenges are not automatically bypassed. Run headed and use the `assist` command to complete a challenge manually, or let the scraper report a `ChallengeError`.
 
-Set `backend.mode: http` and configure `backend.base_url`, `carrier_config_path`,
-`shipments_path`, `carrier_config_method`, `timeout_seconds`, `retry_attempts`,
-`auth_header`, and `auth_scheme` in `config/app.yaml`. `TRACKER_BASE_URL` can
-override the configured base URL. The configuration endpoint
-currently defaults to `GET`; shipment requests use `POST` with `billTo` and
-`carrierCode`. `TRACKER_API_TOKEN` is optional and is read only when configured.
-Use `.env.example` as a reference and export the variables in the process environment.
-Backend passwords are held as `SecretStr` and passed through the placeholder
-`IdentityCredentialResolver`; replace its TODO once the encryption scheme is supplied.
+## Configure environment
 
-Run one intake and scraper cycle with `python -m app.main run-once --force`.
-Run the separable recurring scheduler with `python -m app.main daemon`. Runs are
-serialized in-process. The default cadence is 6 hours with ±25 minutes of jitter.
+Copy `.env.example` to `.env` and load it into the process environment using your deployment's secret manager or service configuration. The application does not read an external YAML carrier config.
 
-## Browser response batching (Phase 2)
+Required/commonly used variables:
 
-The HTTP intake path now groups active tracking jobs by client and carrier. `BatchScraper`
-opens one browser session per carrier, fills the configured input with batches of PROs,
-clicks the configured button once, and captures JSON responses from the page's network
-response events. It maps responses back by the configured `response_pro_path`, retries
-missing PROs once individually, and returns raw JSON in each `ScrapeBatchResult`.
-`Runner.run_once()` returns those under `scrape_results`; mapping and backend posting are
-not part of this phase. File-backed runs retain the existing adapter path.
+- `TRACKER_BASE_URL`: backend base URL.
+- `TRACKER_API_TOKEN`: optional bearer token if the backend requires authentication.
+- `CARRIER_CONFIG_METHOD`: `GET` by default; use `POST` only if the backend contract requires it.
+- `CARRIER_CONFIG_PATH`, `SHIPMENTS_PATH`, `CARRIER_ACTIVITY_PATH`: API paths if different from defaults.
+- `CARRIER_CREDENTIALS_KEY`: Fernet key only when carrier passwords returned by the backend are Fernet-encrypted. Set `CREDENTIAL_RESOLVER=fernet` explicitly when that matches the backend contract. Do not treat Base64 as encryption or guess the encoding.
+- `BROWSER_HEADLESS`: `true` or `false` to override the profile's browser mode.
+- `RUN_INTERVAL_HOURS`: daemon cadence (default 3 hours).
+- `RUN_TIMEOUT_HOURS`: optional per-cycle timeout.
+- `LOG_LEVEL`, `LOG_FORMAT`, `LOGS_DIR`, `BROWSER_STATE_DIR`, `SCRAPER_DEBUG_DIR`: operational settings.
 
-Carrier behavior lives in each `mapping.yaml` under `site`: selectors, `input_mode`,
-`delimiter`, `batch_size`, `response_url_pattern`, `expected_response_shape`,
-`response_pro_path`, normalization flags, timeouts, pacing, and optional login selectors.
-Login config uses `enabled`, `required`, `url`, and `selectors` (`username`, `password`,
-`submit`, optional `success`); leave it disabled until the carrier's login flow is verified.
-Use `[]` in JSON paths to expand arrays (for example, `data[].proNumber`). Set
-`browser.browser_mode` per carrier; Saia uses `patchright` for its undetected browser mode.
-Errors are isolated to a carrier batch, and diagnostics save a screenshot plus a
-sanitized URL file under `debug_dir`.
+Carrier `processingFrequency` is interpreted as **minutes** (for example, `1439` is approximately one day); `0` means run on each daemon cycle. Because there is no persistent local scheduler, a restart resets this in-memory timing gate. `--force` ignores the gate. Confirm the units with the backend contract if they differ.
 
-To add a carrier, create its client/carrier folder and mapping YAML, then fill in the
-clearly marked selector and response-pattern TODO values after observing the carrier
-page's browser network traffic. No core-code carrier-name branch is needed.
-
-## Diagnostics & Troubleshooting (Deployment & Standalone Tool)
-
-A standalone diagnostic tool is available to test the browser lifecycle (steps 1 to 7) without intake, PRO numbers, or TMS posting:
+## Run
 
 ```powershell
-# Run diagnostics for Forward Air:
-python -m app.tools.diagnose --carrier FORWARDAIR
+# One scrape cycle; `--force` ignores the process-local frequency gate
+python -m app.main run-once --force
 
-# Run diagnostics with headed browser to see the GUI:
-python -m app.tools.diagnose --carrier FORWARDAIR --headed
+# Restrict to a carrier (backend carrier code or a built-in alias)
+python -m app.main run-once --force --carrier SAI001
+python -m app.main run-once --force --carrier ESTE03
+python -m app.main run-once --force --carrier FORW-LTL
 
-# Run diagnostics for Saia with custom URL override:
-python -m app.tools.diagnose --carrier SAIA --url https://www.saia.com
+# Do not send AddCarrierActivity updates (still performs intake and scraping)
+python -m app.main run-once --force --dry-run
+
+# Repeat cycles at RUN_INTERVAL_HOURS
+python -m app.main daemon
+
+# Open a carrier tracking URL in a headed browser to handle a challenge
+python -m app.main assist SAI001 --client 134034
+
+# Browser lifecycle diagnostic against the backend-provided tracking URL
+python -m app.tools.diagnose --carrier SAI001 --headed
 ```
 
-### Running on Windows Server
+Install browser dependencies after installing requirements:
 
-To run diagnostics under the exact same Windows service/task user account:
+```powershell
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+```
 
-1. **Interactive Run under Service Account**:
-   ```cmd
-   runas /user:DOMAIN\ServiceAccount "powershell -NoExit -Command cd C:\projects\WebScrapping; python -m app.tools.diagnose --carrier FORWARDAIR"
-   ```
+Patchright may require its own browser install according to the installed Patchright version.
 
-2. **Administrator-less Scheduled Task**:
-   If the job runs via Windows Task Scheduler without interactive login:
-   ```cmd
-   schtasks /create /tn "DiagnoseScraper" /tr "C:\projects\WebScrapping\.venv\Scripts\python.exe -m app.tools.diagnose --carrier FORWARDAIR" /sc once /st 12:00 /ru "DOMAIN\ServiceAccount" /rp "YourPassword"
-   schtasks /run /tn "DiagnoseScraper"
-   ```
-   Inspect results in `logs/diagnostics/diagnose_forwardair_<timestamp>.log`.
+## Logs and runtime files
 
-### Diagnostic Environment Variables
+Runtime logs, screenshots, sanitized failure URLs, and browser storage state are under `app/runtime/` by default. No database, local queue, local processed-shipment list, or local carrier configuration is created.
 
-- `SCRAPER_DEBUG=1`: Enables detailed browser console, request failure reasons, page errors, responses >= 400, and enables `DEBUG=pw:api,pw:browser` driver logs. Default: `0`.
-- `SCRAPER_TRACE=1`: Captures full Playwright execution traces saved as `trace.zip` inside `logs/diagnostics/<run_id>/...`. View with `npx playwright show-trace trace.zip`. Default: `0`.
-- `POST_ERRORS_TO_TMS=true`: Controls whether scraper infrastructure failures are reported to TMS (`AddCarrierActivity`). Default: `false` (skips TMS post with warning).
-- `BROWSER_HEADLESS=true/false`: Global override for browser headless mode across all carriers. If unset, automatically defaults to `true` when running in headless environments (e.g. without DISPLAY on POSIX or non-interactive Windows services).
+## Add support for a carrier
 
+Add a Python profile to `app/carrier_profiles.py` containing the carrier's selectors, network response URL pattern, response-to-PRO path, mapping, and status normalization. Do not hardcode `trackingUrl`, credentials, active state, or processing cadence there; those remain backend-owned. Test with a known shipment and inspect the captured network response before changing mapping rules.

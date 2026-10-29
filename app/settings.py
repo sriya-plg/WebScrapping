@@ -1,24 +1,19 @@
-"""Settings + the client/carrier config loader.
+"""Application settings and built-in carrier behavior profiles.
 
-Layout (one folder per client, everything for that client inside it):
-  app/clients/<client>/client.yaml                       billTo codes + defaults for all its carriers
-  app/clients/<client>/carriers/<carrier>/mapping.yaml   raw-JSON -> common-field mapping (+ optional overrides)
-  app/clients/<client>/carriers/<carrier>/adapter.py     OPTIONAL: only for sites needing custom behaviour
-  app/clients/<client>/carriers/<carrier>/hooks.py       OPTIONAL: post(payload, result, account)
-Unknown YAML keys are rejected (typos fail loudly) and a broken carrier never stops the others from loading.
+Carrier URLs, credentials, active flags, processing frequencies and delays are read from the
+backend API. Only stable browser selectors and response/mapping behavior live in Python code.
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+import os
 from typing import Any, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
-# Well-known canonical fields (mapping.yaml `fields:`). Extra names are allowed and
-# stored on TrackingResult so a new backend key can be mapped from YAML alone.
+# Well-known canonical fields. Extra names are allowed and stored on TrackingResult.
 COMMON_FIELDS = {
     "reference", "status", "pickup_date", "delivery_date", "eta",
     "origin", "destination", "pieces", "weight",
@@ -35,8 +30,8 @@ class _Strict(BaseModel):
 
 
 class BrowserConfig(_Strict):
-    provider: Literal["playwright_stealth", "patchright", "crawl4ai", "browser_use"] = "playwright_stealth"
-    browser_mode: Literal["playwright_stealth", "patchright", "browser_use"] | None = None
+    provider: Literal["playwright_stealth", "patchright"] = "playwright_stealth"
+    browser_mode: Literal["playwright_stealth", "patchright"] | None = None
     headless: bool = True
     channel: str | None = None          # e.g. "chrome" (recommended with patchright)
     locale: str = "en-US"
@@ -61,8 +56,10 @@ class Limits(_Strict):
 
 
 class SiteConfig(_Strict):
-    """How to drive the site. EVERYTHING is optional: the generic adapter auto-detects it.
-    Set a value only to override a wrong auto-detection."""
+    """Stable browser selectors, response correlation, pacing, and JSON mapping behavior.
+
+    The tracking URL itself is overlaid from the backend record at runtime.
+    """
     tracking_url: str | None = None      # default: trackingUrl from the backend record
     input_selector: str | None = None    # default: auto-detect the search box
     submit_selector: str | None = None   # button to click; BatchScraper never relies on Enter
@@ -76,7 +73,7 @@ class SiteConfig(_Strict):
     response_pro_path: str = "proNumber"
     input_mode: Literal["multiline", "delimited"] = "multiline"
     delimiter: str = "\n"
-    batch_size: int = 1  # mapping.yaml site.batch_size: PROs per tracking submit
+    batch_size: int = 1  # PROs per tracking submit
     strip_spaces_dashes: bool = True
     strip_leading_zeros: bool = False
     action_min_delay_s: float = 0.4
@@ -87,15 +84,11 @@ class SiteConfig(_Strict):
     inter_batch_delay_s: float = 0.0     # pause between separate batches in seconds
     idle_window_s: float = 2.0
     login: dict[str, Any] | None = None
-    ref_type_select: str | None = None   # <select> for PRO/BOL if the site has one
-    ref_type_map: dict[str, str] = {}
-    transport: Literal["browser", "http"] = "browser"
-    http_url_template: str | None = None  # transport=http: e.g. https://host/api/track/{ref}
     match_ref: bool = True               # require the captured JSON to contain the reference we searched
     response_timeout_s: float = 30
     settle_s: float = 1.0
     challenge_wait_s: float = 60
-    extra: dict[str, Any] = {}           # adapter-specific settings (e.g. Saia login)
+    extra: dict[str, Any] = Field(default_factory=dict)  # adapter-specific settings (e.g. Saia login)
 
     @field_validator("batch_size")
     @classmethod
@@ -146,8 +139,7 @@ def _default_activity_events_map() -> dict[str, str]:
 class ActivityConfig(_Strict):
     """AddCarrierActivity: 2=processing, 3=successful scrape, 4=failed/not found.
 
-    payload_map / events_map are the client-level YAML that turns TrackingResult + ctx
-    into the backend body. Override in client.yaml (all carriers) or a carrier mapping.yaml.
+    payload_map / events_map turn TrackingResult + context into the backend body.
     """
     ml_status_default: int = 4
     ml_status_by_outcome: dict[str, int] = Field(default_factory=lambda: {
@@ -166,14 +158,14 @@ class ActivityConfig(_Strict):
 class MappingConfig(_Strict):
     """raw carrier JSON -> common schema. Explicit `fields` win; `auto` fills the gaps.
 
-    Field names should match TrackingResult (or a new extra key you also list in
-    activity.payload_map). Dotted paths use `|` for first-non-empty fallbacks so a
-    carrier JSON change is a YAML edit, not a code change.
+    Field names should match TrackingResult (or an extra key mapped into the backend payload).
+    Dotted paths use `|` for first-non-empty fallbacks so carrier response changes are localized
+    to this built-in Python profile.
     """
     auto: bool = True
-    fields: dict[str, str] = {}          # canonical field -> dotted path ("a.b|c.d" = first non-empty)
-    compose: dict[str, str] = {}         # field -> "{path} {path}" template (date+time, city+state)
-    status_map: dict[str, str] = {}      # carrier status text (any case) -> common status
+    fields: dict[str, str] = Field(default_factory=dict)  # canonical field -> dotted path ("a.b|c.d" = first non-empty)
+    compose: dict[str, str] = Field(default_factory=dict)  # field -> "{path} {path}" template (date+time, city+state)
+    status_map: dict[str, str] = Field(default_factory=dict)  # carrier status text -> common status
     events: dict[str, Any] | None = None  # {path, fields, compose}
 
     @field_validator("fields")
@@ -192,7 +184,7 @@ class MappingConfig(_Strict):
         unknown = set(flds) - EVENT_FIELDS
         if unknown:
             # Extra event keys are kept on TrackingEvent (extra=allow).
-            logger.debug("mapping.yaml events.fields extra keys: %s", sorted(unknown))
+            logger.debug("carrier profile events.fields extra keys: %s", sorted(unknown))
         if "path" in v and not v["path"]:
             raise ValueError("events.path must be a dotted JSON path")
         return v
@@ -202,28 +194,21 @@ class CarrierSpec(_Strict):
     code: str
     client: str
     name: str | None = None
-    aliases: list[str] = []
-    browser: BrowserConfig = BrowserConfig()
-    limits: Limits = Limits()
-    block_markers: list[str] = []
-    site: SiteConfig = SiteConfig()
-    mapping: MappingConfig = MappingConfig()
-    pending: dict[str, Any] = {}         # client-level: how to call/parse the pending-refs API
-    payload_map: dict[str, str] = {}     # client-level: common schema -> backend payload keys
-    activity: ActivityConfig = ActivityConfig()
-    post_hook: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    limits: Limits = Field(default_factory=Limits)
+    block_markers: list[str] = Field(default_factory=list)
+    site: SiteConfig = Field(default_factory=SiteConfig)
+    mapping: MappingConfig = Field(default_factory=MappingConfig)
+    activity: ActivityConfig = Field(default_factory=ActivityConfig)
 
 
 class BackendSettings(_Strict):
-    mode: Literal["file", "http"] = "file"
+    mode: Literal["http"] = "http"
     base_url: str = ""
     token_env: str = "TRACKER_API_TOKEN"
-    carriers_path: str = "/carriers"
-    post_path: str = "/tracking/bulk"
     carrier_activity_path: str = "/api/orderentry/AddCarrierActivity"
     carrier_activity_auth: bool = False
-    stub_dir: str = "stub"
-    outbox_dir: str = "out"
     carrier_config_path: str = "/api/orderentry/GetCarrierConfigurationDetails"
     shipments_path: str = "/api/orderentry/GetCarrierShipmentDetails"
     carrier_config_method: Literal["GET", "POST"] = "GET"
@@ -235,7 +220,7 @@ class BackendSettings(_Strict):
 
 
 class ScheduleSettings(_Strict):
-    interval_hours: int = 6
+    interval_hours: float = 6
     jitter_minutes: int = 25
     seed: str = "tracker"
 
@@ -246,84 +231,93 @@ class AlertSettings(_Strict):
 
 
 class AppSettings(_Strict):
+    """Application-only settings. Carrier URLs, credentials and cadence come from the backend API."""
     log_level: str = "INFO"
     log_format: Literal["console", "json"] = "console"
-    logs_dir: str = "logs"
-    state_db: str = "state/tracker.db"
-    state_dir: str = "state/browser"
-    samples_dir: str = "state/samples"   # raw JSON saved when mapping fails / status unknown (to write mapping.yaml)
-    debug_dir: str = "state/debug"
-    clients_dir: str = "app/clients"
-    backend: BackendSettings = BackendSettings()
-    schedule: ScheduleSettings = ScheduleSettings()
-    alerts: AlertSettings = AlertSettings()
+    logs_dir: str = "app/runtime/logs"
+    browser_state_dir: str = "app/runtime/browser"
+    debug_dir: str = "app/runtime/debug"
+    backend: BackendSettings = Field(default_factory=BackendSettings)
+    schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
+    alerts: AlertSettings = Field(default_factory=AlertSettings)
     dry_run: bool = False
     post_errors_to_tms: bool = False
 
 
-def load_settings(path: str | Path = "config/app.yaml") -> AppSettings:
-    p = Path(path)
-    return AppSettings(**(yaml.safe_load(p.read_text()) or {})) if p.exists() else AppSettings()
-
-
-# ------------------------------------------------------------------------------------------ loader
-_MAPPING_KEYS = {"auto", "fields", "compose", "status_map", "events"}
-
-
-def _merge(a: dict, b: dict) -> dict:
-    """Dicts merge recursively; everything else (lists, scalars) is replaced by the override."""
-    out = dict(a)
-    for k, v in b.items():
-        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
-    return out
+def load_settings(path: str | Path | None = None) -> AppSettings:
+    """Load non-carrier settings from environment variables; no external YAML config."""
+    backend = BackendSettings(
+        mode="http",
+        base_url=os.environ.get("TRACKER_BASE_URL", "https://plgtst.pegasuslogistics.com"),
+        token_env=os.environ.get("TRACKER_TOKEN_ENV", "TRACKER_API_TOKEN"),
+        carrier_config_path=os.environ.get("CARRIER_CONFIG_PATH", "/api/orderentry/GetCarrierConfigurationDetails"),
+        shipments_path=os.environ.get("SHIPMENTS_PATH", "/api/orderentry/GetCarrierShipmentDetails"),
+        carrier_config_method=os.environ.get("CARRIER_CONFIG_METHOD", "GET"),
+        carrier_activity_path=os.environ.get("CARRIER_ACTIVITY_PATH", "/api/orderentry/AddCarrierActivity"),
+        carrier_activity_auth=os.environ.get("CARRIER_ACTIVITY_AUTH", "false").lower() in {"1", "true", "yes"},
+        timeout_seconds=float(os.environ.get("BACKEND_TIMEOUT_SECONDS", "30")),
+        retry_attempts=int(os.environ.get("BACKEND_RETRY_ATTEMPTS", "3")),
+        auth_header=os.environ.get("BACKEND_AUTH_HEADER", "Authorization"),
+        auth_scheme=os.environ.get("BACKEND_AUTH_SCHEME", "Bearer"),
+        credential_resolver=os.environ.get("CREDENTIAL_RESOLVER", "identity"),
+    )
+    return AppSettings(
+        log_level=os.environ.get("LOG_LEVEL", "INFO"),
+        log_format=os.environ.get("LOG_FORMAT", "console"),
+        logs_dir=os.environ.get("LOGS_DIR", "app/runtime/logs"),
+        browser_state_dir=os.environ.get("BROWSER_STATE_DIR", "app/runtime/browser"),
+        debug_dir=os.environ.get("SCRAPER_DEBUG_DIR", "app/runtime/debug"),
+        backend=backend,
+        schedule=ScheduleSettings(
+            interval_hours=float(os.environ.get("RUN_INTERVAL_HOURS", "3")),
+            jitter_minutes=0,
+        ),
+        alerts=AlertSettings(webhook_url=os.environ.get("ALERT_WEBHOOK_URL") or None),
+        dry_run=os.environ.get("DRY_RUN", "false").lower() in {"1", "true", "yes"},
+        post_errors_to_tms=os.environ.get("POST_ERRORS_TO_TMS", "false").lower() in {"1", "true", "yes"},
+    )
 
 
 class SpecResolver:
-    """(billTo, carrierCode) -> CarrierSpec"""
+    """Resolve a carrier's code to built-in site behavior, overlaying API-owned runtime fields."""
 
     def __init__(self):
-        self._by_bill_to: dict[str, str] = {}
+        from app.carrier_profiles import CARRIER_PROFILES
+        self._profiles = CARRIER_PROFILES
+        self._by_code: dict[str, CarrierSpec] = {}
         self._specs: dict[tuple[str, str], CarrierSpec] = {}
-        self.errors: list[str] = []          # config problems, surfaced in logs; never fatal
+        self.errors: list[str] = []
+        for code, raw in self._profiles.items():
+            try:
+                spec = CarrierSpec(**raw)
+                for alias in [code, *spec.aliases]:
+                    self._by_code[alias.upper()] = spec
+                    self._specs[(spec.client.upper(), alias.upper())] = spec
+            except Exception as exc:
+                self.errors.append(f"built-in profile {code}: {type(exc).__name__}: {exc}")
 
-    def resolve(self, bill_to: str, code: str) -> CarrierSpec | None:
-        client = self._by_bill_to.get(bill_to.upper())
-        return self._specs.get((client.upper(), code.upper())) if client else None
+    def resolve(self, bill_to: str, code: str, config: Any | None = None) -> CarrierSpec | None:
+        spec = self._by_code.get(str(code).upper())
+        if spec is None:
+            return None
+        site_updates: dict[str, Any] = {}
+        if config is not None:
+            tracking_url = getattr(config, "tracking_url", None)
+            if tracking_url:
+                site_updates["tracking_url"] = tracking_url
+            delay = getattr(config, "processing_delay", None)
+            if delay is not None and float(delay) > 0:
+                site_updates["inter_pro_delay_s"] = max(spec.site.inter_pro_delay_s, float(delay))
+        site = spec.site.model_copy(update=site_updates) if site_updates else spec.site
+        return spec.model_copy(update={"site": site})
 
     def clients(self) -> list[str]:
-        return sorted(set(self._by_bill_to.values()))
+        return sorted({spec.client for spec in self._by_code.values()})
 
     def carriers(self, client: str) -> list[str]:
-        return sorted({s.code for (c, _), s in self._specs.items() if c == client.upper()})
+        return sorted({spec.code for spec in self._by_code.values() if spec.client.upper() == client.upper()})
 
 
-def load_resolver(clients_dir: str | Path) -> SpecResolver:
-    res, root = SpecResolver(), Path(clients_dir)
-    for cdir in sorted(p for p in root.glob("*") if (p / "client.yaml").exists()):
-        key = cdir.name
-        try:
-            ccfg = yaml.safe_load((cdir / "client.yaml").read_text()) or {}
-            defaults = ccfg.get("defaults", {})
-            for b in ccfg.get("bill_to") or [key]:
-                res._by_bill_to[b.upper()] = key
-        except Exception as e:
-            res.errors.append(f"{key}/client.yaml: {e}")
-            continue
-        for f in sorted((cdir / "carriers").glob("*/mapping.yaml")):
-            code = f.parent.name.upper()
-            try:
-                raw = yaml.safe_load(f.read_text()) or {}
-                mapping = {k: raw.pop(k) for k in list(raw) if k in _MAPPING_KEYS}
-                merged = _merge(defaults, raw)
-                merged["mapping"] = _merge(merged.get("mapping", {}), mapping)
-                merged.update(code=code, client=key)
-                if not merged.get("post_hook") and (f.parent / "hooks.py").exists():
-                    merged["post_hook"] = f"app.clients.{key}.carriers.{f.parent.name}.hooks:post"
-                spec = CarrierSpec(**merged)
-                for k in (code, *spec.aliases):
-                    res._specs[(key.upper(), k.upper())] = spec
-            except Exception as e:      # one broken carrier must not take the others down
-                res.errors.append(f"{key}/{f.parent.name}/mapping.yaml: {e}")
-    for e in res.errors:
-        logger.error("config error: %s", e)
-    return res
+def load_resolver(clients_dir: str | Path | None = None) -> SpecResolver:
+    """Compatibility entry point; no local client/carrier config files are read."""
+    return SpecResolver()

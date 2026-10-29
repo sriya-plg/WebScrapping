@@ -1,4 +1,4 @@
-"""Orchestrator only: fetch accounts, resolve specs, start jobs, report. Business logic lives in job.py."""
+"""Single orchestration path: backend intake -> browser/network capture -> mapping -> backend update."""
 from __future__ import annotations
 
 import asyncio
@@ -6,213 +6,156 @@ import logging
 import time
 import uuid
 
-from app.backend.client import BackendUnavailable
-from app.core.intake import build_jobs
-from app.core.job import AccountJob, CarrierGuard, RunContext, Services, label
-from app.core.metrics import RunMetrics
-from app.core.resilience import CircuitBreaker, Pacer, retry
 from app.core.batch_updates import enqueue_tracking_updates
 from app.core.diagnostics import log_environment_report, setup_asyncio_exception_handler
 from app.core.intake import build_jobs
-from app.core.job import AccountJob, CarrierGuard, RunContext, Services, label
-from app.core.metrics import RunMetrics
-from app.core.resilience import CircuitBreaker, Pacer, retry
 from app.core.scraper import BatchScraper
 from app.logging_setup import carrier_var, client_var, log, register_secret, run_file_logger, run_id_var
-from app.models import CarrierAccount
 from app.settings import CarrierSpec, SpecResolver
 
 logger = logging.getLogger(__name__)
 
 
 class Runner:
-    def __init__(self, sv: Services, resolver: SpecResolver):
+    def __init__(self, sv, resolver: SpecResolver):
         self.sv, self.resolver = sv, resolver
-        self._guards: dict[str, CarrierGuard] = {}
         self._run_lock = asyncio.Lock()
+        self._last_run: dict[tuple[str, str, int], float] = {}  # process-local scheduler only
         self.last_results: list[dict] = []
 
-    def _guard(self, spec: CarrierSpec, a: CarrierAccount) -> CarrierGuard:
-        L = spec.limits
-        g = self._guards.setdefault(spec.code, CarrierGuard(Pacer(L.max_concurrency, L.min_delay_s, L.max_delay_s),
-                                                            CircuitBreaker(L.breaker_threshold, L.breaker_cooldown_s),
-                                                            asyncio.Lock()))
-        if a.processing_delay:                        # backend-driven pacing floor
-            g.pacer.min_delay = max(L.min_delay_s, a.processing_delay)
-            g.pacer.max_delay = max(L.max_delay_s, a.processing_delay * 2)
-        return g
-
-    def _due(self, spec: CarrierSpec, a: CarrierAccount) -> bool:
-        if not a.processing_frequency:
+    def _due(self, config, spec: CarrierSpec, force: bool) -> bool:
+        if force:
             return True
-        last = float(self.sv.store.kv_get(f"last:{spec.client}:{spec.code}:{a.bill_to}") or 0)
-        tol = self.sv.settings.schedule.jitter_minutes * 60    # a jittered tick may arrive early by up to the jitter
-        return time.time() - last >= a.processing_frequency * 3600 - tol
+        frequency = float(config.processing_frequency or 0)
+        if frequency <= 0:
+            return True
+        key = (spec.client, spec.code, int(config.bill_to))
+        last = self._last_run.get(key)
+        # API processingFrequency is interpreted as minutes (e.g. 1439 ~= once daily).
+        return last is None or time.time() - last >= frequency * 60
 
     async def run_once(self, only: set[str] | None = None, force: bool = False,
                        only_clients: set[str] | None = None) -> dict:
         async with self._run_lock:
             run_id = uuid.uuid4().hex[:12]
             run_id_var.set(run_id)
-            logs_dir = getattr(self.sv.settings, "logs_dir", "logs")
-            with run_file_logger(run_id=run_id, logs_dir=logs_dir) as log_file:
+            with run_file_logger(run_id=run_id, logs_dir=self.sv.settings.logs_dir) as log_file:
                 logger.info("run started | run_id=%s log_file=%s", run_id, log_file)
                 try:
                     setup_asyncio_exception_handler(asyncio.get_running_loop(), logger)
-                except Exception:
-                    pass
-                try:
                     log_environment_report(self.sv.settings, self.resolver, logger)
-                except Exception as env_exc:
-                    logger.warning("failed to log environment report: %s", env_exc)
-                try:
-                    res = await self._run_once(only, force, only_clients)
-                    logger.info("run finished | run_id=%s log_file=%s", run_id, log_file)
-                    return res
                 except Exception as exc:
-                    logger.exception("run failed | run_id=%s log_file=%s error=%s", run_id, log_file, exc)
-                    raise
+                    logger.debug("optional diagnostics setup skipped: %s", type(exc).__name__)
+                result = await self._run_once(only, force, only_clients)
+                logger.info("run finished | run_id=%s log_file=%s", run_id, log_file)
+                return result
 
-    async def _run_once(self, only: set[str] | None = None, force: bool = False,
-                        only_clients: set[str] | None = None) -> dict:
-        if hasattr(self.sv.backend, "get_carrier_configs") and hasattr(self.sv.backend, "get_shipments"):
-            return await self._run_batch_once(only, only_clients)
-        rid = run_id_var.get()
-        if not rid or rid == "-":
-            rid = uuid.uuid4().hex[:12]
-            run_id_var.set(rid)
-        ctx = RunContext(run_id=rid, metrics=RunMetrics())
-        run_id_var.set(ctx.run_id)
-        t0, m = time.time(), ctx.metrics
-        accounts = await retry(self.sv.backend.get_carrier_accounts, attempts=1, base=2, cap=30,
-                               retry_on=(BackendUnavailable,))
-        jobs: list[tuple[CarrierSpec, CarrierAccount]] = []
-        for a in accounts:
-            if a.password:
-                register_secret(a.password.get_secret_value())
-            if not a.is_active:
-                continue
-            spec = self.resolver.resolve(a.bill_to, a.carrier_code)
-            if spec is None:
-                m.count(f"{a.bill_to}/{a.carrier_code}", "not_configured")
-                log(logger, logging.WARNING, "carrier not configured for this client (or its config is broken)",
-                    bill_to=a.bill_to, carrier_code=a.carrier_code)
-                continue
-            if (only and spec.code.upper() not in only) or (only_clients and spec.client.upper() not in only_clients):
-                continue
-            if not force and not self._due(spec, a):
-                m.count(label(spec), "skipped_not_due")
-                continue
-            jobs.append((spec, a))
-
-        async def guarded(spec: CarrierSpec, a: CarrierAccount):
-            run_id_var.set(ctx.run_id)
-            client_var.set(spec.client)
-            carrier_var.set(spec.code)
-            await AccountJob(self.sv, ctx, spec, a, self._guard(spec, a)).run()
-
-        try:
-            results = await asyncio.gather(*[guarded(s, a) for s, a in jobs], return_exceptions=True)
-            for (s, a), r in zip(jobs, results):
-                if isinstance(r, BaseException):      # last-resort containment: one job can't sink the run
-                    m.count(label(s), "job_crashed")
-                    logger.error("job crashed: %s/%s billTo=%s", s.client, s.code, a.bill_to, exc_info=r)
-        finally:
-            for p in ctx.providers.values():
-                try:
-                    await p.close()
-                except Exception:
-                    pass
-        summary = m.summary()
-        log(logger, logging.INFO, "run complete", run_id=ctx.run_id, seconds=round(time.time() - t0, 1), metrics=summary)
-        return summary
-
-    async def _run_batch_once(self, only: set[str] | None, only_clients: set[str] | None) -> dict:
-        """Phase 2 path: intake groups -> browser batches -> raw results, isolated per carrier."""
+    async def _run_once(self, only: set[str] | None, force: bool, only_clients: set[str] | None) -> dict:
         started = time.time()
-        rid = run_id_var.get()
-        if not rid or rid == "-":
-            rid = uuid.uuid4().hex[:12]
-            run_id_var.set(rid)
-        grouped = await build_jobs(self.sv.backend)
+        self.last_results = []
+        summary: dict[str, dict] = {}
+
+        def selected(config):
+            spec = self.resolver.resolve(str(config.bill_to), config.carrier_code, config=config)
+            if only:
+                identifiers = {config.carrier_code.upper()}
+                if spec is not None:
+                    identifiers.add(spec.code.upper())
+                    identifiers.update(alias.upper() for alias in spec.aliases)
+                if not identifiers.intersection(only):
+                    return False
+            customer_name = (config.customer_name or "").strip().upper()
+            if only_clients and (spec is None or spec.client.upper() not in only_clients) and str(config.bill_to).upper() not in only_clients and customer_name not in only_clients:
+                return False
+            if spec is None:
+                summary[f"{config.bill_to}/{config.carrier_code}"] = {
+                    "requested": 0, "failures": 1, "error": "unsupported carrier profile"}
+                logger.error("no built-in carrier profile | bill_to=%s carrier_code=%s",
+                             config.bill_to, config.carrier_code)
+                return False
+            if not self._due(config, spec, force):
+                summary[f"{spec.client}/{spec.code}"] = {"requested": 0, "skipped_not_due": 1}
+                return False
+            return True
+
+        def intake_empty(config):
+            spec = self.resolver.resolve(str(config.bill_to), config.carrier_code, config=config)
+            if spec is not None:
+                self._last_run[(spec.client, spec.code, int(config.bill_to))] = time.time()
+
+        grouped = await build_jobs(self.sv.backend, include_config=selected, on_empty=intake_empty)
         groups: dict[tuple[int, str], list] = {}
         for carriers in grouped.values():
             for carrier_code, jobs in carriers.items():
                 for job in jobs:
                     groups.setdefault((job.carrier.bill_to, carrier_code), []).append(job)
-        self.last_results = []
-        summary: dict[str, dict] = {}
+        active_groups = 0
 
-        async def scrape_group(key: tuple[int, str], jobs: list):
+        async def scrape_group(key: tuple[int, str], jobs: list) -> None:
+            nonlocal active_groups
             bill_to, code = key
             config = jobs[0].carrier
-            spec = self.resolver.resolve(str(bill_to), code)
+            spec = self.resolver.resolve(str(bill_to), code, config=config)
             if spec is None:
-                logger.warning("carrier not configured", extra={"fields": {"bill_to": bill_to,
-                               "carrier_code": code}})
+                summary[f"{bill_to}/{code}"] = {"requested": len(jobs), "failures": len(jobs),
+                                                "error": "unsupported carrier profile"}
+                logger.error("no built-in carrier interaction profile | bill_to=%s carrier_code=%s", bill_to, code)
                 return
-            if only and spec.code.upper() not in only:
-                return
-            if only_clients and spec.client.upper() not in only_clients and str(bill_to).upper() not in only_clients:
-                return
+            active_groups += 1
+            for job in jobs:
+                if job.carrier.password:
+                    register_secret(job.carrier.password.get_secret_value())
             client_var.set(spec.client)
             carrier_var.set(spec.code)
-            provider = self.sv.provider_factory(spec.browser, self.sv.settings.state_dir)
+            provider = self.sv.provider_factory(spec.browser, self.sv.settings.browser_state_dir)
             try:
                 outcome = await BatchScraper(provider, spec, self.sv.settings.debug_dir).run_batch(jobs, spec)
                 activity_stats = await enqueue_tracking_updates(
                     self.sv.settings, self.sv.backend, config, spec, run_id_var.get() or "", outcome, jobs)
-                self.last_results.append({"client": spec.client, "carrier": spec.code,
-                                          "bill_to": bill_to, "result": outcome})
                 label_key = f"{spec.client}/{spec.code}"
-                found_n = sum(1 for o in outcome.outcomes.values() if o == "found")
-                not_found_n = sum(1 for o in outcome.outcomes.values() if o == "not_found")
+                found_n = sum(1 for value in outcome.outcomes.values() if value == "found")
+                not_found_n = sum(1 for value in outcome.outcomes.values() if value == "not_found")
                 summary[label_key] = {
-                    "requested": len(outcome.requested),
-                    "received": len(outcome.received),
-                    "found": found_n,
-                    "not_found": not_found_n,
-                    "missing": len(outcome.missing),
-                    "errors": len(outcome.errors),
-                    "activity_posted": activity_stats.get("posted", 0),
+                    "requested": len(outcome.requested), "received": len(outcome.received),
+                    "found": found_n, "not_found": not_found_n, "missing": len(outcome.missing),
+                    "errors": len(outcome.errors), "activity_posted": activity_stats.get("posted", 0),
+                    "activity_skipped": activity_stats.get("skipped", 0),
                     "activity_failed": activity_stats.get("failed", 0),
                 }
-                first_err = getattr(outcome, "first_error", None) or ""
+                self.last_results.append({"client": spec.client, "carrier": spec.code,
+                                          "bill_to": bill_to, "result": outcome})
                 log(logger, logging.INFO, "carrier batch complete", client=spec.client,
                     carrier_code=spec.code, bill_to=bill_to, requested=len(outcome.requested),
                     received=len(outcome.received), found=found_n, not_found=not_found_n,
                     missing=len(outcome.missing), failures=len(outcome.errors),
-                    first_error=first_err)
-
-                if getattr(self.sv, "queue", None) and (
-                    outcome.error_type == "ChallengeError"
-                    or any(err.get("type") == "ChallengeError" for err in outcome.errors)
-                ):
-                    blocked_refs = [j.search_value for j in jobs if outcome.outcomes.get(j.search_value) == "error"] or outcome.requested
-                    reason = outcome.error_message or "reCAPTCHA challenge presented (manual intervention required)"
-                    await self.sv.queue.raise_(
-                        run_id_var.get() or "",
-                        spec.client,
-                        spec.code,
-                        str(bill_to),
-                        blocked_refs,
-                        reason,
-                        spec.site.tracking_url or config.tracking_url,
-                    )
+                    activity_posted=activity_stats.get("posted", 0),
+                    activity_failed=activity_stats.get("failed", 0), first_error=outcome.first_error or "")
+                if outcome.error_type == "ChallengeError" or any(
+                        err.get("type") == "ChallengeError" for err in outcome.errors):
+                    blocked_refs = [j.search_value for j in jobs if outcome.outcomes.get(j.search_value) == "error"]
+                    await self.sv.queue.raise_(run_id_var.get() or "", spec.client, spec.code, str(bill_to),
+                                               blocked_refs or outcome.requested,
+                                               outcome.error_message or "Carrier anti-bot challenge requires intervention",
+                                               spec.site.tracking_url or config.tracking_url)
+                # Do not postpone retries for a carrier-level failure/challenge. The backend remains
+                # authoritative for whether a delivered result is new, changed, or already processed.
+                if not outcome.error_type:
+                    self._last_run[(spec.client, spec.code, int(bill_to))] = time.time()
             finally:
                 try:
                     await provider.close()
                 except Exception as exc:
-                    logger.warning("browser provider close failed", extra={"fields": {
-                        "carrier_code": code, "error": type(exc).__name__}})
+                    logger.warning("browser provider close failed | carrier=%s error=%s", code, type(exc).__name__)
 
-        outcomes = await asyncio.gather(*(scrape_group(key, jobs) for key, jobs in groups.items()),
-                                         return_exceptions=True)
-        for (bill_to, code), outcome in zip(groups, outcomes):
-            if isinstance(outcome, BaseException):
-                summary[f"{bill_to}/{code}"] = {"failures": 1}
-                logger.error("carrier batch failed | bill_to=%s carrier_code=%s error=%s",
-                             bill_to, code, type(outcome).__name__, exc_info=outcome)
-        log(logger, logging.INFO, "run complete", seconds=round(time.time() - started, 1),
-            carriers_fetched=len(groups), jobs_built=sum(len(j) for j in groups.values()), summary=summary)
+        # Run carrier groups sequentially: one browser lifecycle at a time avoids parallel
+        # browser/profile contention and keeps CAPTCHA/session behavior predictable.
+        for (bill_to, code), jobs in groups.items():
+            try:
+                await scrape_group((bill_to, code), jobs)
+            except Exception as exc:
+                summary[f"{bill_to}/{code}"] = {"failures": 1, "error": type(exc).__name__}
+                logger.exception("carrier batch failed | bill_to=%s carrier_code=%s", bill_to, code)
+        log(logger, logging.INFO, "run complete", run_id=run_id_var.get(),
+            seconds=round(time.time() - started, 1), carriers_fetched=len(groups),
+            carriers_processed=active_groups, jobs_built=sum(len(j) for j in groups.values()), summary=summary)
         return {**summary, "scrape_results": self.last_results}

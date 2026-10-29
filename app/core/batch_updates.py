@@ -1,4 +1,4 @@
-"""Batch scrape path -> Pegasus AddCarrierActivity (one POST per housebill)."""
+"""Batch scrape path -> backend AddCarrierActivity (one POST per housebill)."""
 from __future__ import annotations
 
 from app.core.carrier_activity import post_scrape_activities

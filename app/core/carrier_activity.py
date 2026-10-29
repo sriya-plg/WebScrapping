@@ -1,4 +1,4 @@
-"""Build and POST Pegasus AddCarrierActivity payloads (one request per housebill)."""
+"""Build and POST backend AddCarrierActivity payloads (one request per housebill)."""
 from __future__ import annotations
 
 import asyncio
@@ -28,11 +28,11 @@ SCRAPE_NO_RESPONSE = "no_response"
 SCRAPE_MAP_FAILED = "map_failed"
 SCRAPE_ERROR = "error"
 
-# Pegasus plgtst (2026-10): mlStatus 2, 3, 4 accepted; 0 and 1 return 400.
+# Backend contract (verified 2026-10): mlStatus 2, 3, 4 accepted; 0 and 1 return 400.
 
 
-def pegasus_ml_status(spec: CarrierSpec, scrape_outcome: str) -> int:
-    """Map scrape outcome -> Pegasus mlStatus id (API lookup table, not our internal codes)."""
+def backend_ml_status(spec: CarrierSpec, scrape_outcome: str) -> int:
+    """Map scrape outcome -> backend mlStatus id (API lookup table, not our internal codes)."""
     activity = spec.activity
     if scrape_outcome in activity.ml_status_by_outcome:
         return int(activity.ml_status_by_outcome[scrape_outcome])
@@ -57,8 +57,8 @@ def account_from_config(config: CarrierConfig) -> CarrierAccount:
     )
 
 
-def pegasus_datetime(value: datetime | str | None, *, fallback: datetime | None = None) -> str:
-    """Pegasus AddCarrierActivity: yyyy-mm-ddTHH:MM:SSZ (UTC, no fractional seconds)."""
+def backend_datetime(value: datetime | str | None, *, fallback: datetime | None = None) -> str:
+    """backend AddCarrierActivity: yyyy-mm-ddTHH:MM:SSZ (UTC, no fractional seconds)."""
     if value is None or (isinstance(value, str) and not value.strip()):
         dt = fallback or datetime.now(timezone.utc)
     elif isinstance(value, datetime):
@@ -130,7 +130,7 @@ def _activity_events(
         if preserve_offsets and isinstance(event_time, str):
             item["eventDateTime"] = event_time
         else:
-            item["eventDateTime"] = pegasus_datetime(event_time, fallback=fallback)
+            item["eventDateTime"] = backend_datetime(event_time, fallback=fallback)
         if item.get("timezone"):
             item["timezone"] = str(item["timezone"]).strip()
         else:
@@ -167,15 +167,15 @@ def _activity_ctx(
         "bill_to": bill_to,
         "ml_status": ml_status,
         "ml_log": (ml_log or "")[:2000],
-        "ml_start": pegasus_datetime(ml_start),
-        "ml_end": pegasus_datetime(ml_end),
+        "ml_start": backend_datetime(ml_start),
+        "ml_end": backend_datetime(ml_end),
         "ml_process_time": max(0, int((ml_end - ml_start).total_seconds() * 1000)),
         "ml_error": (ml_error or "")[:2000],
         "service_level": (result.service_level if result else None) or "",
         "pod_name": pod_name,
         "pod_datetime": (
             pod_dt if preserve_pod_datetime and pod_dt
-            else pegasus_datetime(pod_dt or None, fallback=ml_end)
+            else backend_datetime(pod_dt or None, fallback=ml_end)
         ),
         "reference": (result.reference if result else job.search_value) or "",
     }
@@ -194,11 +194,11 @@ def build_add_carrier_activity(
     ml_error: str = "",
     spec: CarrierSpec | None = None,
 ) -> dict[str, Any]:
-    """Build the AddCarrierActivity body from YAML `activity.payload_map` / `events_map`.
+    """Build the AddCarrierActivity body from the built-in carrier profile mappings.
 
     Runtime scrape fields (mlStatus, timestamps, housebill, ...) live on `ctx.*`.
     Carrier-mapped fields (service_level, pod_*, events) come from TrackingResult.
-    Change paths in client.yaml or the carrier mapping.yaml — not this function.
+    Carrier mapping behavior is defined in the built-in Python profiles.
     """
     activity = spec.activity if spec is not None else ActivityConfig()
     ctx = _activity_ctx(
@@ -240,7 +240,7 @@ def build_add_carrier_activity(
         if key in payload:
             if key == "podDateTime" and activity.preserve_pod_datetime:
                 continue
-            payload[key] = pegasus_datetime(payload[key] or None, fallback=ml_end)
+            payload[key] = backend_datetime(payload[key] or None, fallback=ml_end)
     if "mlLog" in payload:
         payload["mlLog"] = str(payload["mlLog"] or "")[:2000]
     if "mlError" in payload:
@@ -381,7 +381,7 @@ async def post_scrape_activities(
                 log(logger, logging.WARNING, "AddCarrierActivity mapping failed",
                     housebill=job.shipment.housebill, pro=job.search_value, error=ml_error)
 
-        ml_status = pegasus_ml_status(spec, scrape_outcome)
+        ml_status = backend_ml_status(spec, scrape_outcome)
         payload = build_add_carrier_activity(
             job, result, outcome=outcome_type, summary=summary,
             ml_start=batch_start, ml_end=ml_end, ml_status=ml_status,
@@ -400,7 +400,9 @@ async def post_scrape_activities(
         )
 
         if settings.dry_run:
-            stats["posted"] += 1
+            stats["skipped"] += 1
+            log(logger, logging.INFO, "dry run: AddCarrierActivity not posted",
+                housebill=job.shipment.housebill, pro=job.search_value)
             continue
 
         try:

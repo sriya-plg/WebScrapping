@@ -1,4 +1,4 @@
-"""Tests for Saia CAPTCHA detection, human-assisted verification, and Browser Use provider."""
+"""Tests for Saia CAPTCHA detection and human-assisted verification with Playwright."""
 import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -7,7 +7,6 @@ import pytest
 
 from app.browser.base import BrowserProvider, BrowserSession, CapturedResponse
 from app.browser.factory import make_provider
-from app.browser.browser_use_provider import BrowserUseProvider
 from app.core.scraper import BatchScraper, ChallengeError
 from app.models import CarrierConfig, ShipmentRef, TrackingJob
 from app.settings import BrowserConfig, CarrierSpec, load_resolver
@@ -158,11 +157,11 @@ def make_jobs(pros):
     ]
 
 
-def test_browser_config_factory_browser_use():
-    cfg = BrowserConfig(browser_mode="browser_use")
-    provider = make_provider(cfg, "state/browser")
-    assert isinstance(provider, BrowserUseProvider)
-    assert provider._should_use_fallback() is True  # No LLM API key set in test environment
+def test_browser_factory_uses_playwright_family_only():
+    cfg = BrowserConfig(browser_mode="patchright", headless=True)
+    provider = make_provider(cfg, "app/runtime/browser")
+    assert provider.__class__.__name__ == "PlaywrightProvider"
+    assert provider.engine == "patchright"
 
 
 def test_captcha_detection_headless_aborts_without_not_found(tmp_path):
@@ -237,60 +236,11 @@ def test_regression_other_carriers_unaffected():
     # Estes
     estes_spec = resolver.resolve("100", "ESTES")
     if estes_spec:
-        assert estes_spec.browser.browser_mode != "browser_use"
+        assert estes_spec.browser.browser_mode in (None, "playwright_stealth")
         assert estes_spec.site.input_selector is not None
     # Forward Air
     fwda_spec = resolver.resolve("100", "FORWARDAIR")
     if fwda_spec:
-        assert fwda_spec.browser.browser_mode != "browser_use"
+        assert fwda_spec.browser.browser_mode == "patchright"
 
 
-def test_browser_use_captcha_solving_and_playwright_resumption(tmp_path):
-    # Tests that when Playwright encounters a CAPTCHA challenge, Browser Use resolves it,
-    # and Playwright resumes capturing the response.
-    pro = "771375800603"
-    entered = "77137580060"
-    payload = [{"proNumber": "77137580060", "status": "In Transit"}]
-    responses = {entered: [CapturedResponse("https://www.saia.com/api/v1/tracking/find-by-pro-number", 200, payload)]}
-
-    session = CaptchaMockSession(
-        bframe_visible=True,
-        solve_after_ticks=None,
-        responses=responses,
-    )
-    session.page = None
-    spec = make_saia_spec(headless=True, assist=False)
-    spec.site.extra["use_browser_use_captcha"] = True
-    jobs = make_jobs([pro])
-
-    from unittest.mock import patch
-
-    with patch("app.browser.browser_use_captcha.solve_captcha_with_browser_use", return_value=True) as mock_solver:
-        result = asyncio.run(
-            BatchScraper(MockProvider(session), spec, str(tmp_path)).run_batch(jobs, spec)
-        )
-
-        assert mock_solver.called
-        assert result.missing == []
-        assert pro in result.received
-        assert result.outcomes[pro] in ("found", "captured")
-        assert session.state_saved is True
-
-
-def test_browser_use_captcha_solver_no_llm_key_falls_back():
-    from app.browser.browser_use_captcha import solve_captcha_with_browser_use
-    import os
-
-    session = CaptchaMockSession(bframe_visible=True)
-    spec = make_saia_spec()
-
-    # Clear LLM keys
-    keys = ["BROWSER_USE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"]
-    orig_env = {k: os.environ.pop(k, None) for k in keys}
-    try:
-        resolved = asyncio.run(solve_captcha_with_browser_use(session, spec, timeout_s=1.0))
-        assert resolved is False
-    finally:
-        for k, v in orig_env.items():
-            if v is not None:
-                os.environ[k] = v

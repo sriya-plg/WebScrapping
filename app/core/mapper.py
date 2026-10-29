@@ -1,10 +1,9 @@
 """Pure functions (no I/O): raw carrier JSON -> common schema -> backend payload.
-Stage 1 (carrier-specific):  normalize()      mapping.yaml fields/events (auto-detection fills gaps)
-Stage 2 (client-specific):   apply_map()      client.yaml payload_map / activity.payload_map / events_map
+Stage 1 (carrier-specific):  normalize()      built-in carrier profile fields/events (auto-detection fills gaps)
+Stage 2 (client-specific):   apply_map()      application profile payload_map / activity.payload_map / events_map
                                              (+ optional hooks.py)"""
 from __future__ import annotations
 
-import importlib
 import re
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -62,7 +61,7 @@ _COMPOSE_RX = re.compile(r"\{([^}]+)\}")
 
 
 def compose_value(obj: Any, template: str, *, preserve_offset: bool = False) -> Any:
-    """Fill `{dotted.path}` placeholders from obj. Used by mapping.yaml `compose:`."""
+    """Fill `{dotted.path}` placeholders from obj. Used by built-in carrier profile `compose:`."""
     if not template:
         return None
     if "{" not in template:
@@ -518,18 +517,3 @@ def apply_map(data: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
         payload[key] = path[1:] if str(path).startswith("=") else get_path(data, str(path))
     return payload
 
-
-def _load_hook(path: str):
-    mod, fn = path.split(":")
-    return getattr(importlib.import_module(mod), fn)
-
-
-def build_payload(spec: CarrierSpec, result: TrackingResult, account: CarrierAccount, run_id: str,
-                  meta: dict | None = None) -> dict:
-    data = result.model_dump(mode="json", exclude={"raw"})
-    data["ctx"] = {"bill_to": account.bill_to, "carrier_code": spec.code, "client": spec.client,
-                   "customer_name": account.customer_name, "run_id": run_id, **(meta or {})}
-    payload = apply_map(data, spec.payload_map)
-    if spec.post_hook:
-        payload = _load_hook(spec.post_hook)(payload, result, account) or payload
-    return payload
