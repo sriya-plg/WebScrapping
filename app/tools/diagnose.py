@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.backend.client import make_backend
-from app.browser.playwright_provider import PlaywrightProvider
+from app.browser.factory import make_provider
 from app.browser.session_utils import session_key
 from app.core.diagnostics import (
     check_block_page,
@@ -133,7 +133,8 @@ async def run_diagnose(
         await backend.close()
         return 1
 
-    provider = PlaywrightProvider(spec.browser, settings.browser_state_dir)
+    # Respects the profile's engine (and SAIA_BROWSER_MODE) exactly like the scraper does.
+    provider = make_provider(spec.browser, settings.browser_state_dir)
     step_results: list[dict[str, Any]] = []
     first_failure: dict[str, Any] | None = None
     session = None

@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import os
 import random
 import time
-from typing import Awaitable, Callable, TypeVar
+from pathlib import Path
+from typing import Any, Awaitable, Callable, TypeVar
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -68,11 +74,53 @@ class Pacer:
 
 
 class CircuitBreaker:
-    """closed -> open after N consecutive blocks -> half-open probe after cooldown."""
+    """closed -> open after N consecutive blocks -> half-open probe after cooldown.
 
-    def __init__(self, threshold: int, cooldown_s: int, now=time.time):
+    With `state_path` + `key`, the failure count and open timestamp persist to a small
+    JSON file so a cooldown survives restarts of one-shot scrape processes. The file is
+    operational state (like browser storage-state JSON), not shipment data. If two
+    scrape processes overlap, the last write wins.
+    """
+
+    def __init__(self, threshold: int, cooldown_s: int, now=time.time,
+                 state_path: str | Path | None = None, key: str = ""):
         self.threshold, self.cooldown_s, self._now = threshold, cooldown_s, now
+        self.state_path = Path(state_path) if state_path else None
+        self.key = key
         self.failures, self.opened_at = 0, None
+        if self.state_path and self.key:
+            self._load()
+
+    def _load(self) -> None:
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8")).get(self.key)
+        except (OSError, ValueError):
+            return
+        if isinstance(data, dict):
+            self.failures = int(data.get("failures") or 0)
+            self.opened_at = data.get("opened_at")
+
+    def _save(self) -> None:
+        if not (self.state_path and self.key):
+            return
+        try:
+            data: dict[str, Any] = {}
+            try:
+                loaded = json.loads(self.state_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+            except (OSError, ValueError):
+                pass
+            if self.opened_at is None and not self.failures:
+                data.pop(self.key, None)  # fully healthy: drop the section
+            else:
+                data[self.key] = {"failures": self.failures, "opened_at": self.opened_at}
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.state_path.with_name(self.state_path.name + ".tmp")
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            os.replace(tmp, self.state_path)
+        except OSError as exc:
+            logger.warning("could not persist circuit-breaker state to %s: %s", self.state_path, exc)
 
     @property
     def is_open(self) -> bool:
@@ -83,13 +131,16 @@ class CircuitBreaker:
             return True
         if self._now() - self.opened_at >= self.cooldown_s:  # half-open: let one probe through
             self.opened_at, self.failures = None, self.threshold - 1
+            self._save()
             return True
         return False
 
     def record_success(self) -> None:
         self.failures, self.opened_at = 0, None
+        self._save()
 
     def record_block(self) -> None:
         self.failures += 1
         if self.failures >= self.threshold:
             self.opened_at = self._now()
+        self._save()

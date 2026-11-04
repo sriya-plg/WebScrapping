@@ -16,8 +16,29 @@ There is **no database** and no local shipment deduplication. Processing-frequen
 
 - **Playwright stealth** is the default: it supports page automation and network response listeners used by the scraper.
 - **Patchright** is retained for Saia and Forward Air profiles where the existing configuration calls for it.
+- **Scrapling** is available for Saia as an opt-in engine (see below): patchright Chromium with extra stealth hardening and a persistent browser profile.
 - **Crawl4AI is not used**: the former provider was only a stub and does not implement the current browser-session/network-listener contract.
 - CAPTCHA image challenges are not automatically bypassed. Run headed and use the `assist` command to complete a challenge manually, or let the scraper report a `ChallengeError`.
+
+## Scrapling for Saia (opt-in)
+
+Saia's profile default stays `patchright`. To run Saia on the Scrapling engine (patchright Chromium via `AsyncStealthySession`, persistent `user_data_dir` profile, stealth launch args, canvas/WebRTC patching, ad blocking), set:
+
+```powershell
+$env:SAIA_BROWSER_MODE = "scrapling"
+python -m app.main run-once --force --carrier SAI001
+```
+
+- Valid values: `scrapling` | `patchright`. Anything else logs a warning (`SAIA_BROWSER_MODE ... is invalid`) and keeps the profile default. Other carriers are never affected.
+- **Before enabling it on the Windows Server deployment**: install the pinned extras there — `python -m pip install -r requirements.txt` includes `scrapling[fetchers]~=0.4.15` (this pulls `curl_cffi`, `msgspec`, `browserforge`, `apify-fingerprint-datapoints`). Also run `python -m patchright install chromium` once. Without the extras the provider logs `scrapling[fetchers] extras not installed ... using patchright fallback` and falls back automatically.
+- If the persistent profile is already in use by another process (e.g. a concurrent `diagnose` run), the run falls back to patchright with a warning naming the lock and pid instead of corrupting the profile.
+- Every run logs a `carrier run outcome` line (and carries the same fields in the run summary): `engine_requested`, `engine_used` (fallbacks are visible here), `batch_size`, `state_reused`, and `challenge_outcome` (`clean` / `checkbox_auto_passed` / `cloudflare_block` / `image_challenge` / `other_error`). Compare several days of these per engine before making scrapling the profile default.
+
+## Resilience behavior
+
+- Repeated `ChallengeError`s open a per-carrier **circuit breaker** (`breaker_threshold` / `breaker_cooldown_s` from the carrier profile). The breaker state persists in `app/runtime/breakers.json` (`BREAKER_STATE_FILE`) so a cooldown survives restarts of one-shot runs. While open, the carrier group is skipped and reported as `skipped_breaker_open`.
+- A `TimeoutError` waiting for the tracking JSON retries the chunk up to `limits.retries` times; challenges and every other error fail immediately.
+- Bot-check pages (text markers, 403/429) are waited out up to `challenge_wait_s` before a run is reported blocked — never as a missing shipment. Distinct PROs that truncate to the same normalized input (11-digit prefix) are excluded and reported as an error instead of being silently dropped.
 
 ## Configure environment
 
@@ -30,10 +51,11 @@ Required/commonly used variables:
 - `CARRIER_CONFIG_METHOD`: `GET` by default; use `POST` only if the backend contract requires it.
 - `CARRIER_CONFIG_PATH`, `SHIPMENTS_PATH`, `CARRIER_ACTIVITY_PATH`: API paths if different from defaults.
 - `CARRIER_CREDENTIALS_KEY`: Fernet key only when carrier passwords returned by the backend are Fernet-encrypted. Set `CREDENTIAL_RESOLVER=fernet` explicitly when that matches the backend contract. Do not treat Base64 as encryption or guess the encoding.
+- `SAIA_BROWSER_MODE`: `scrapling` or `patchright` — Saia-only engine override (see "Scrapling for Saia").
 - `BROWSER_HEADLESS`: `true` or `false` to override the profile's browser mode.
 - `RUN_INTERVAL_HOURS`: daemon cadence (default 3 hours).
 - `RUN_TIMEOUT_HOURS`: optional per-cycle timeout.
-- `LOG_LEVEL`, `LOG_FORMAT`, `LOGS_DIR`, `BROWSER_STATE_DIR`, `SCRAPER_DEBUG_DIR`: operational settings.
+- `LOG_LEVEL`, `LOG_FORMAT`, `LOGS_DIR`, `BROWSER_STATE_DIR`, `SCRAPER_DEBUG_DIR`, `BREAKER_STATE_FILE`: operational settings.
 
 Carrier `processingFrequency` is interpreted as **minutes** (for example, `1439` is approximately one day); `0` means run on each daemon cycle. Because there is no persistent local scheduler, a restart resets this in-memory timing gate. `--force` ignores the gate. Confirm the units with the backend contract if they differ.
 

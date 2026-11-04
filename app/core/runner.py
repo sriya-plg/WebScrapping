@@ -10,6 +10,7 @@ from app.carriers.adapter_registry import carrier_adapter_registry
 from app.core.batch_updates import enqueue_tracking_updates
 from app.core.diagnostics import log_environment_report, setup_asyncio_exception_handler
 from app.core.intake import build_jobs
+from app.core.resilience import CircuitBreaker
 from app.logging_setup import (
     carrier_var,
     client_var,
@@ -28,8 +29,21 @@ class Runner:
         self.sv, self.resolver = sv, resolver
         self._run_lock = asyncio.Lock()
         self._last_run: dict[tuple[str, str, int], float] = {}  # process-local scheduler only
+        self._breakers: dict[str, CircuitBreaker] = {}
         self.last_results: list[dict] = []
         self.last_log_file = None
+
+    def _breaker(self, spec: CarrierSpec, bill_to) -> CircuitBreaker:
+        """Per (client, carrier, billTo) breaker; state persists across process restarts."""
+        key = f"{spec.client}|{spec.code}|{bill_to}"
+        if key not in self._breakers:
+            self._breakers[key] = CircuitBreaker(
+                threshold=spec.limits.breaker_threshold,
+                cooldown_s=spec.limits.breaker_cooldown_s,
+                state_path=self.sv.settings.breaker_state_file,
+                key=key,
+            )
+        return self._breakers[key]
 
     def _due(self, config, spec: CarrierSpec, force: bool) -> bool:
         if force:
@@ -111,6 +125,14 @@ class Runner:
                 logger.error("no built-in carrier interaction profile | bill_to=%s carrier_code=%s", bill_to, code)
                 return
             active_groups += 1
+            breaker = self._breaker(spec, bill_to)
+            if not breaker.allow():
+                log(logger, logging.WARNING, "carrier scrape skipped (circuit breaker open)",
+                    client=spec.client, carrier_code=spec.code, bill_to=bill_to,
+                    failures=breaker.failures, threshold=breaker.threshold,
+                    cooldown_s=breaker.cooldown_s)
+                summary[f"{spec.client}/{spec.code}"] = {"requested": len(jobs), "skipped_breaker_open": 1}
+                return
             for job in jobs:
                 if job.carrier.password:
                     register_secret(job.carrier.password.get_secret_value())
@@ -120,6 +142,11 @@ class Runner:
             try:
                 adapter = carrier_adapter_registry.create(provider, spec, self.sv.settings.debug_dir)
                 outcome = await adapter.track_batch(jobs)
+                if outcome.error_type == "ChallengeError" or any(
+                        err.get("type") == "ChallengeError" for err in outcome.errors):
+                    breaker.record_block()
+                else:
+                    breaker.record_success()
                 activity_stats = await enqueue_tracking_updates(
                     self.sv.settings, self.sv.backend, config, spec, run_id_var.get() or "", outcome, jobs)
                 label_key = f"{spec.client}/{spec.code}"
@@ -131,6 +158,12 @@ class Runner:
                     "errors": len(outcome.errors), "activity_posted": activity_stats.get("posted", 0),
                     "activity_skipped": activity_stats.get("skipped", 0),
                     "activity_failed": activity_stats.get("failed", 0),
+                    # Per-run outcome measurement (engine comparison over several days)
+                    "started_at": outcome.started_at,
+                    "engine_requested": outcome.engine_requested,
+                    "engine_used": outcome.engine_used,
+                    "state_reused": outcome.state_reused,
+                    "challenge_outcome": outcome.challenge_outcome,
                 }
                 self.last_results.append({"client": spec.client, "carrier": spec.code,
                                           "bill_to": bill_to, "result": outcome})

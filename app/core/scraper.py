@@ -10,6 +10,7 @@ import re
 import time
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
@@ -26,6 +27,10 @@ from app.settings import CarrierSpec
 logger = logging.getLogger(__name__)
 
 CaptureOutcome = str  # found | not_found | captured | error | missing
+
+# Most severe observed challenge wins; "other_error" is applied at run end when errors
+# occurred but no challenge was ever detected.
+CHALLENGE_RANK = {"clean": 0, "checkbox_auto_passed": 1, "cloudflare_block": 2, "image_challenge": 3}
 
 
 class ChallengeError(RuntimeError):
@@ -49,6 +54,13 @@ class ScrapeBatchResult:
     error_message: str | None = None
     traceback_summary: str | None = None
     first_error: str | None = None
+    # Per-run outcome measurement (engine comparison over several days):
+    # a silent scrapling->patchright fallback shows up as engine_requested != engine_used.
+    started_at: str = ""
+    engine_requested: str | None = None
+    engine_used: str | None = None
+    state_reused: bool | None = None
+    challenge_outcome: str = "clean"
 
     def scrape_items(self) -> list[dict[str, Any]]:
         """Per-PRO raw carrier JSON for a future map/post step."""
@@ -221,6 +233,12 @@ class BatchScraper:
         self.provider, self.spec = provider, spec
         self.debug_dir = Path(debug_dir)
         self._diagnostic_index = 0
+        self._challenge_outcome = "clean"
+
+    def _note_challenge(self, outcome: str) -> None:
+        """Track the most severe challenge observed during this run (for outcome logging)."""
+        if CHALLENGE_RANK.get(outcome, 0) > CHALLENGE_RANK.get(self._challenge_outcome, 0):
+            self._challenge_outcome = outcome
 
     async def run(self, job: TrackingJob) -> ScrapeBatchResult:
         if self.spec is None:
@@ -228,7 +246,10 @@ class BatchScraper:
         return await self.run_batch([job], self.spec)
 
     async def run_batch(self, jobs: list[TrackingJob], spec: CarrierSpec) -> ScrapeBatchResult:
+        self._challenge_outcome = "clean"
         result = ScrapeBatchResult(requested=[job.search_value for job in jobs])
+        result.started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        result.engine_requested = spec.browser.browser_mode or spec.browser.provider
         if not jobs:
             return result
         site = spec.site
@@ -243,6 +264,34 @@ class BatchScraper:
             result.errors.append({"type": "ScrapeConfigError", "message":
                                   "replace carrier TODO values: " + ", ".join(missing_config)})
             return result
+        # Distinct backend PROs that normalize onto one key (e.g. sharing the same 11-digit
+        # prefix under pro_input_digits) would collide inside a chunk's keys dict and one
+        # shipment would be silently dropped; fail those loudly and never submit them.
+        key_values: dict[str, list[str]] = {}
+        for job in jobs:
+            key_values.setdefault(normalize_pro(job.search_value, spec), []).append(job.search_value)
+        ambiguous = {value for values in key_values.values() if len(set(values)) > 1
+                     for value in values}
+        if ambiguous:
+            for value in sorted(ambiguous):
+                result.outcomes[value] = "error"
+                result.summaries[value] = {
+                    "failed_step": "pro_normalization",
+                    "error_message": "ambiguous PRO: distinct backend PROs truncate to the "
+                                      "same normalized input value (pro_input_digits); not submitted",
+                }
+                result.errors.append({
+                    "type": "ScrapeConfigError",
+                    "pro": value,
+                    "message": "ambiguous PRO normalization; not submitted",
+                    "failed_step": "pro_normalization",
+                })
+            log(logger, logging.ERROR, "ambiguous PRO normalization; excluding from submission",
+                carrier_code=spec.code, pros=sorted(ambiguous))
+            jobs = [job for job in jobs if job.search_value not in ambiguous]
+            if not jobs:
+                result.missing = list(result.requested)
+                return result
         session: BrowserSession | None = None
         config = jobs[0].carrier
         secrets = [value for value in (config.user_name,
@@ -255,8 +304,11 @@ class BatchScraper:
             client_var.set(spec.client)
             carrier_var.set(spec.code)
             session = await self.provider.open_session(session_key(spec))
+            result.engine_used = getattr(session, "engine_name", None)
+            result.state_reused = getattr(session, "state_reused", None)
             log(logger, logging.INFO, "browser session opened", bill_to=config.bill_to,
-                job_count=len(jobs), batch_size=spec.site.batch_size)
+                job_count=len(jobs), batch_size=spec.site.batch_size,
+                engine_used=result.engine_used, state_reused=result.state_reused)
             await self._open_and_login(session, jobs[0], spec, secrets)
             site = spec.site
             log(logger, logging.INFO, "tracking page ready",
@@ -274,8 +326,8 @@ class BatchScraper:
                 log(logger, logging.INFO, "tracking batch submit", chunk=chunk_index + 1,
                     pro_count=len(pros), pros=pros, entered_pros=entered)
                 try:
-                    await self._submit(session, chunk, spec, pattern, keys, result.received,
-                                       result.outcomes, result.summaries)
+                    await self._submit_chunk(session, chunk, spec, pattern, keys, result.received,
+                                             result.outcomes, result.summaries, jobs[0], chunk_index)
                 except Exception as exc:
                     failed_step = getattr(exc, "failed_step", "chunk_submit")
                     err_type = type(exc).__name__
@@ -291,6 +343,7 @@ class BatchScraper:
                         result.first_error = first_err
 
                     if await session.looks_blocked(spec.block_markers or None):
+                        self._note_challenge("cloudflare_block")
                         exc = ChallengeError("carrier challenge detected")
                     log(logger, logging.ERROR, "tracking batch failed", stage="chunk",
                         error=type(exc).__name__, detail=safe_msg, failed_step=failed_step)
@@ -334,6 +387,7 @@ class BatchScraper:
                                 result.first_error = f"{err_type}@{failed_step}"
 
                             if await session.looks_blocked(spec.block_markers or None):
+                                self._note_challenge("cloudflare_block")
                                 exc = ChallengeError("carrier challenge detected")
                             log(logger, logging.ERROR, "tracking fallback failed", stage="fallback",
                                 pro=job.search_value, error=type(exc).__name__,
@@ -375,6 +429,7 @@ class BatchScraper:
             result.first_error = result.first_error or first_err
 
             if session and await session.looks_blocked(spec.block_markers or None):
+                self._note_challenge("cloudflare_block")
                 exc = ChallengeError("carrier challenge detected")
                 err_type = "ChallengeError"
                 safe_msg = "carrier challenge detected"
@@ -429,10 +484,23 @@ class BatchScraper:
 
         found_n = sum(1 for o in result.outcomes.values() if o == "found")
         not_found_n = sum(1 for o in result.outcomes.values() if o == "not_found")
+        if self._challenge_outcome == "clean" and (result.errors or result.failed_step):
+            result.challenge_outcome = "other_error"
+        else:
+            result.challenge_outcome = self._challenge_outcome
         log(logger, logging.INFO, "batch scrape summary",
             captured=len(result.received), found=found_n, not_found=not_found_n,
             missing=len(result.missing), errors=len(result.errors),
             first_error=result.first_error or "")
+        # Per-run outcome line: compare engines (requested vs actually used, incl. silent
+        # scrapling->patchright fallbacks) and challenge rates over several days.
+        log(logger, logging.INFO, "carrier run outcome",
+            carrier=spec.code, client=spec.client, timestamp=result.started_at,
+            engine_requested=result.engine_requested, engine_used=result.engine_used,
+            batch_size=site.batch_size, state_reused=result.state_reused,
+            challenge_outcome=result.challenge_outcome,
+            found=found_n, not_found=not_found_n, missing=len(result.missing),
+            errors=len(result.errors))
         return result
 
     async def _fill_tracking_input(self, session: BrowserSession, site, chunk: list[TrackingJob],
@@ -536,7 +604,8 @@ class BatchScraper:
                 elapsed_ms=elapsed_ms,
             )
 
-            # Block page detection
+            # Block page detection: text markers, page title/URL, and bot-block status codes
+            # (403/429) all enter the same wait-then-raise path instead of failing instantly.
             page_text = ""
             try:
                 if hasattr(session, "page"):
@@ -544,10 +613,22 @@ class BatchScraper:
             except Exception:
                 pass
             block_reason = check_block_page(page_text, final_url, status_code, page_title)
-            if block_reason:
-                logger.warning("block page detected after navigation: %s (url=%s, title=%s)", block_reason, final_url, page_title)
-            if await session.looks_blocked(spec.block_markers or None):
-                raise ChallengeError(f"carrier challenge detected: {block_reason or 'block marker match'}")
+            markers_blocked = await session.looks_blocked(spec.block_markers or None)
+            status_blocked = status_code in (403, 429)
+            if markers_blocked or status_blocked:
+                logger.warning("block page detected after navigation: %s (url=%s, title=%s)",
+                               block_reason or "block marker match", final_url, page_title)
+                cleared = await self._wait_challenge_clear(session, spec)
+                if cleared and status_blocked and not markers_blocked:
+                    # Status-only block (403/429, no markers): reload once and re-check.
+                    reloaded = await session.goto(tracking_url)
+                    status2 = getattr(reloaded, "status", None) if reloaded else None
+                    cleared = (status2 not in (403, 429)
+                               and not await session.looks_blocked(spec.block_markers or None))
+                if not cleared:
+                    self._note_challenge("cloudflare_block")
+                    raise ChallengeError(
+                        f"carrier challenge detected: {block_reason or 'block marker match'}")
 
         await self._dismiss_consent(session, spec)
         await execute_login(session, spec, config.user_name, config.password, tracking_url)
@@ -639,13 +720,65 @@ class BatchScraper:
             except Exception:
                 pass
 
+    async def _wait_challenge_clear(self, session: BrowserSession, spec: CarrierSpec,
+                                     timeout_s: float | None = None) -> bool:
+        """Poll a bot-check/Cloudflare interstitial until it clears or the budget expires.
+
+        Headed real Chrome usually lets non-interactive interstitials auto-clear; waiting
+        first turns transient challenges into a delay instead of a failed run.
+        """
+        budget = float(timeout_s if timeout_s is not None else spec.site.challenge_wait_s)
+        if budget <= 0:
+            return not await session.looks_blocked(spec.block_markers or None)
+        logger.info("bot challenge detected for %s; waiting up to %.1fs for it to clear",
+                    spec.code, budget)
+        deadline = time.monotonic() + budget
+        while True:
+            if not await session.looks_blocked(spec.block_markers or None):
+                logger.info("bot challenge cleared for %s after waiting", spec.code)
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(2.0, remaining))
+
+    async def _ensure_not_blocked(self, session: BrowserSession, spec: CarrierSpec) -> None:
+        """Wait out a bot challenge; raise the scraper's ChallengeError if it never clears."""
+        if await session.looks_blocked(spec.block_markers or None):
+            if not await self._wait_challenge_clear(session, spec):
+                self._note_challenge("cloudflare_block")
+                raise ChallengeError("carrier challenge detected (did not clear within challenge_wait_s)")
+
+    async def _submit_chunk(self, session: BrowserSession, chunk: list[TrackingJob], spec: CarrierSpec,
+                            pattern: re.Pattern, keys: dict[str, str], received: dict[str, Any],
+                            outcomes: dict[str, CaptureOutcome],
+                            summaries: dict[str, dict[str, Any]],
+                            first_job: TrackingJob, chunk_index: int) -> None:
+        """Submit one chunk, retrying on TimeoutError only (spec.limits.retries times).
+
+        A missing tracking JSON response is usually a transient carrier hiccup; re-navigate
+        and try again. ChallengeError and every other exception propagate immediately.
+        """
+        retries = max(0, int(spec.limits.retries))
+        for attempt in range(retries + 1):
+            try:
+                await self._submit(session, chunk, spec, pattern, keys, received, outcomes, summaries)
+                return
+            except TimeoutError:
+                if attempt >= retries:
+                    raise
+                log(logger, logging.WARNING, "tracking attempt timed out; retrying chunk",
+                    chunk=chunk_index + 1, attempt=attempt + 1, attempts=retries + 1,
+                    pro_count=len(chunk), timeout_s=spec.site.response_timeout_s)
+                await self._return_to_tracking(session, first_job, spec)
+                await self._delay(spec.site.action_min_delay_s, spec.site.action_max_delay_s)
+
     async def _submit(self, session: BrowserSession, chunk: list[TrackingJob], spec: CarrierSpec,
                       pattern: re.Pattern, keys: dict[str, str], received: dict[str, Any],
                       outcomes: dict[str, CaptureOutcome],
                       summaries: dict[str, dict[str, Any]]) -> None:
         site = spec.site
-        if await session.looks_blocked(spec.block_markers or None):
-            raise ChallengeError("carrier challenge detected")
+        await self._ensure_not_blocked(session, spec)
 
         async with traced_step(8, "wait for input/submit controls", extra={"input_selector": site.input_selector, "submit_selector": site.submit_selector, "timeout_s": 12}) as step8:
             input_sel, submit_sel = await self._resolve_tracking_selectors(session, spec)
@@ -721,8 +854,7 @@ class BatchScraper:
                         matches.append(response)
                     elif isinstance(response.json, list):
                         matches.append(response)
-            if await session.looks_blocked(spec.block_markers or None):
-                raise ChallengeError("carrier challenge detected")
+            await self._ensure_not_blocked(session, spec)
             if not matches:
                 not_found = await self._carrier_not_found_message(session, spec)
                 if not_found:
@@ -973,10 +1105,12 @@ class BatchScraper:
                 if page is not None:
                     if await page.frame_locator(anchor_frame).locator(checked_selector).is_visible():
                         logger.info("reCAPTCHA verified successfully for %s", spec.code)
+                        self._note_challenge("checkbox_auto_passed")
                         await asyncio.sleep(0.5)
                         return
                 elif await session.is_visible(checked_selector, frame=anchor_frame):
                     logger.info("reCAPTCHA verified successfully for %s", spec.code)
+                    self._note_challenge("checkbox_auto_passed")
                     await asyncio.sleep(0.5)
                     return
 
@@ -992,6 +1126,7 @@ class BatchScraper:
                     return false;
                 }"""))
                 if challenge:
+                    self._note_challenge("image_challenge")
                     headless_override = os.environ.get("BROWSER_HEADLESS") or os.environ.get("HEADLESS")
                     if headless_override is not None:
                         actual_headless = headless_override.lower() in ("1", "true", "yes")

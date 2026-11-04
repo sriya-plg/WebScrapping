@@ -42,6 +42,22 @@ Backend AddCarrierActivity API
 
 Playwright is the default because page automation and JSON network-response interception are central requirements. Patchright remains available for profiles that need its Chromium patches. Crawl4AI and Browser Use provider integrations were removed because they were not a complete drop-in implementation of the current `BrowserProvider` and response-listener contract.
 
+### Scrapling (opt-in, Saia)
+
+Saia can run on Scrapling (`AsyncStealthySession`): patchright Chromium launched as a **persistent context** (`user_data_dir` under the browser state dir, so cookies/localStorage survive restarts) with extra stealth hardening (stealth launch args, canvas/WebRTC patching, ad-block list). Enable it with `SAIA_BROWSER_MODE=scrapling`; the profile default stays `patchright` so engine comparison changes exactly one variable at a time. The override is applied in `SpecResolver.resolve` for the canonical `SAIA` code only — Estes and Forward Air are unaffected, and an invalid value logs a warning and keeps the profile default.
+
+The ScraplingProvider falls back to the plain patchright provider (today's production path) with a WARNING that carries the reason whenever: the `scrapling[fetchers]` extras are missing, the import fails, the profile is locked by another process (a lockfile guards `user_data_dir`; stale locks older than 24h are replaced), or the engine fails to launch. A second process (e.g. `diagnose`) therefore degrades to patchright instead of corrupting the profile. `solve_cloudflare` is deliberately not set — it only acts inside `engine.fetch()`, which the scraper never calls; the scraper drives a page from `engine.context` directly (same Playwright API as patchright).
+
+### Resilience
+
+- **Circuit breaker** per `(client, carrier, billTo)` group, from the profile's `limits.breaker_threshold` / `breaker_cooldown_s`. Because runs are one-shot processes on the deployment server, breaker state persists to `app/runtime/breakers.json` (set `BREAKER_STATE_FILE` to move it) so a cooldown survives restarts. `ChallengeError` outcomes record blocks; anything else records success. While open, the group is skipped and summarized as `skipped_breaker_open`.
+- **Chunk retries**: a `TimeoutError` while waiting for the tracking JSON retries the chunk up to `limits.retries` times (re-navigating between attempts). Every other exception — including challenges — fails immediately.
+- **Bot-check wait**: text markers, page title/URL, and 403/429 statuses enter the same wait-then-raise path — the scraper waits up to `site.challenge_wait_s` for an interstitial to clear (reloading once for status-only blocks) before raising `ChallengeError`. Challenges are never classified as not-found.
+
+### Per-run outcome logging
+
+Every run logs a `carrier run outcome` line and carries the same fields in the run summary: `started_at`, `engine_requested`, `engine_used` (a silent scrapling→patchright fallback shows up here), `batch_size`, `state_reused`, and `challenge_outcome` (`clean` / `checkbox_auto_passed` / `cloudflare_block` / `image_challenge` / `other_error`, most severe wins). Compare these over several days per engine before making the scrapling engine the profile default.
+
 CAPTCHA handling is deliberately conservative: the scraper may click the checkbox and wait for an interactive verification when a visible browser is running, but it does not solve image challenges automatically. A challenge that cannot be completed is reported as a carrier-level error and should not be classified as a missing shipment.
 
 ## Carrier-specific behavior

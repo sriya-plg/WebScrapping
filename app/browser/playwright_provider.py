@@ -130,10 +130,25 @@ _DISCOVER_JS = r"""() => {
 }"""
 
 
+def _effective_headless(cfg: BrowserConfig) -> bool:
+    """Profile headless with the standard env/OS overrides (shared by all engines)."""
+    headless = cfg.headless
+    env_headless = os.environ.get("BROWSER_HEADLESS") or os.environ.get("HEADLESS")
+    if env_headless is not None:
+        headless = env_headless.lower() in ("true", "1", "yes")
+    elif os.name == "posix" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        headless = True
+    return headless
+
+
 class _PWSession(BrowserSession):
-    def __init__(self, context, page, state_path: Path | None, nav_timeout_s: float, cdp_url: str | None = None):
+    def __init__(self, context, page, state_path: Path | None, nav_timeout_s: float, cdp_url: str | None = None,
+                 engine_name: str | None = None, state_reused: bool = False):
         self.context, self.page, self.state_path = context, page, state_path
         self.cdp_url = cdp_url
+        # Engine identity + state provenance for per-run outcome logging (scrapling fallback visibility).
+        self.engine_name = engine_name
+        self.state_reused = state_reused
         page.set_default_timeout(nav_timeout_s * 1000)
 
     def _target(self, selector: str, frame: str | None = None):
@@ -451,12 +466,7 @@ class PlaywrightProvider(BrowserProvider):
                 self._pw = await async_playwright().start()
 
         if not self._browser:
-            headless = self.cfg.headless
-            env_headless = os.environ.get("BROWSER_HEADLESS") or os.environ.get("HEADLESS")
-            if env_headless is not None:
-                headless = env_headless.lower() in ("true", "1", "yes")
-            elif os.name == "posix" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-                headless = True
+            headless = _effective_headless(self.cfg)
 
             kw: dict[str, Any] = {"headless": headless, "timeout": 60_000}
             if self.cfg.channel:
@@ -466,13 +476,18 @@ class PlaywrightProvider(BrowserProvider):
             args = []
             if self.engine == "playwright":
                 args.append("--disable-blink-features=AutomationControlled")
-            env_cdp_port = os.environ.get("REMOTE_DEBUGGING_PORT")
-            cdp_port = int(env_cdp_port) if env_cdp_port is not None else _free_port()
-            logger.info("chrome remote debugging port=%s", cdp_port)
-            if not any(a.startswith("--remote-debugging-port") for a in args):
-                args.append(f"--remote-debugging-port={cdp_port}")
+            # The remote debugging port is a debug surface; only open it on demand.
+            if os.environ.get("REMOTE_DEBUGGING_PORT") or os.environ.get(
+                    "SCRAPER_DEBUG", "0").lower() in ("1", "true", "yes"):
+                env_cdp_port = os.environ.get("REMOTE_DEBUGGING_PORT")
+                cdp_port = int(env_cdp_port) if env_cdp_port is not None else _free_port()
+                logger.info("chrome remote debugging port=%s", cdp_port)
+                if not any(a.startswith("--remote-debugging-port") for a in args):
+                    args.append(f"--remote-debugging-port={cdp_port}")
+                self.cdp_url = f"http://127.0.0.1:{cdp_port}"
+            else:
+                self.cdp_url = None
             kw["args"] = args
-            self.cdp_url = f"http://127.0.0.1:{cdp_port}"
 
             exec_path = "unknown"
             try:
@@ -508,9 +523,10 @@ class PlaywrightProvider(BrowserProvider):
     async def open_session(self, key: str) -> BrowserSession:
         await self._start()
         state = self.state_dir / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', key)}.json"
+        state_reused = bool(self.cfg.persist_state and state.exists())
         ctx_kw: dict[str, Any] = dict(locale=self.cfg.locale, timezone_id=self.cfg.timezone_id,
                                       viewport={"width": self.cfg.viewport_w, "height": self.cfg.viewport_h})
-        if self.cfg.persist_state and state.exists():
+        if state_reused:
             ctx_kw["storage_state"] = str(state)
 
         async with traced_step(3, "create context", extra={
@@ -543,6 +559,8 @@ class PlaywrightProvider(BrowserProvider):
             state if self.cfg.persist_state else None,
             self.cfg.nav_timeout_s,
             cdp_url=getattr(self, "cdp_url", None),
+            engine_name=self.engine,
+            state_reused=state_reused,
         )
 
     async def close(self):

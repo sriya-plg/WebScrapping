@@ -11,6 +11,7 @@ dependencies = [
     "playwright>=1.45",
     "playwright-stealth>=1.0.6",
     "pydantic>=2.6",
+    "scrapling[fetchers]~=0.4.15",
     "tzdata>=2024.1",
 ]
 

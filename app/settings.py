@@ -30,8 +30,8 @@ class _Strict(BaseModel):
 
 
 class BrowserConfig(_Strict):
-    provider: Literal["playwright_stealth", "patchright"] = "playwright_stealth"
-    browser_mode: Literal["playwright_stealth", "patchright"] | None = None
+    provider: Literal["playwright_stealth", "patchright", "scrapling"] = "playwright_stealth"
+    browser_mode: Literal["playwright_stealth", "patchright", "scrapling"] | None = None
     headless: bool = True
     channel: str | None = None          # e.g. "chrome" (recommended with patchright)
     locale: str = "en-US"
@@ -41,6 +41,9 @@ class BrowserConfig(_Strict):
     persist_state: bool = True          # reuse cookies between runs
     proxy: dict[str, str] | None = None
     nav_timeout_s: float = 45
+    # Extra StealthConfig kwargs passed through to the scrapling engine
+    # (e.g. {"block_ads": True}). Ignored by the playwright/patchright engines.
+    scrapling_options: dict[str, Any] = Field(default_factory=dict)
 
 
 class Limits(_Strict):
@@ -237,6 +240,8 @@ class AppSettings(_Strict):
     logs_dir: str = "logs"
     browser_state_dir: str = "app/runtime/browser"
     debug_dir: str = "app/runtime/debug"
+    # Operational circuit-breaker state (persists cooldowns across one-shot run restarts).
+    breaker_state_file: str = "app/runtime/breakers.json"
     backend: BackendSettings = Field(default_factory=BackendSettings)
     schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
     alerts: AlertSettings = Field(default_factory=AlertSettings)
@@ -267,6 +272,7 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
         logs_dir=os.environ.get("LOGS_DIR", "logs"),
         browser_state_dir=os.environ.get("BROWSER_STATE_DIR", "app/runtime/browser"),
         debug_dir=os.environ.get("SCRAPER_DEBUG_DIR", "app/runtime/debug"),
+        breaker_state_file=os.environ.get("BREAKER_STATE_FILE", "app/runtime/breakers.json"),
         backend=backend,
         schedule=ScheduleSettings(
             interval_hours=float(os.environ.get("RUN_INTERVAL_HOURS", "3")),
@@ -276,6 +282,32 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
         dry_run=os.environ.get("DRY_RUN", "false").lower() in {"1", "true", "yes"},
         post_errors_to_tms=os.environ.get("POST_ERRORS_TO_TMS", "false").lower() in {"1", "true", "yes"},
     )
+
+
+SAIA_BROWSER_MODES = ("patchright", "scrapling")
+
+
+def _apply_saia_browser_mode(spec: CarrierSpec) -> CarrierSpec:
+    """SAIA_BROWSER_MODE overrides the Saia profile's engine (Saia only).
+
+    Valid values: patchright | scrapling. Invalid values log a warning and keep the
+    profile default so a typo can never disable a working engine. Other carriers are
+    untouched; engine comparison must change exactly one variable at a time.
+    """
+    if spec.code != "SAIA":
+        return spec
+    value = (os.environ.get("SAIA_BROWSER_MODE") or "").strip()
+    if not value:
+        return spec
+    mode = value.lower()
+    current = spec.browser.browser_mode or spec.browser.provider
+    if mode not in SAIA_BROWSER_MODES:
+        logger.warning("SAIA_BROWSER_MODE=%r is invalid (expected %s); using profile default %r",
+                       value, "|".join(SAIA_BROWSER_MODES), current)
+        return spec
+    if mode == current:
+        return spec
+    return spec.model_copy(update={"browser": spec.browser.model_copy(update={"browser_mode": mode})})
 
 
 class SpecResolver:
@@ -314,7 +346,8 @@ class SpecResolver:
         runtime_client = (
             getattr(config, "customer_name", None) if config is not None else None
         ) or str(bill_to or "default")
-        return spec.model_copy(update={"site": site, "client": str(runtime_client)})
+        spec = spec.model_copy(update={"site": site, "client": str(runtime_client)})
+        return _apply_saia_browser_mode(spec)
 
     def clients(self) -> list[str]:
         """Return no static clients: client assignments are supplied by the backend."""

@@ -164,6 +164,15 @@ def test_browser_factory_uses_playwright_family_only():
     assert provider.engine == "patchright"
 
 
+def test_browser_factory_dispatches_scrapling():
+    from app.browser.scrapling_provider import ScraplingProvider
+    cfg = BrowserConfig(browser_mode="scrapling", headless=True)
+    provider = make_provider(cfg, "app/runtime/browser")
+    assert isinstance(provider, ScraplingProvider)
+    # Launch happens lazily per session, not at construction.
+    assert provider._engine is None
+
+
 def test_captcha_detection_headless_aborts_without_not_found(tmp_path):
     # Headless mode: bframe appears -> ChallengeError is raised
     session = CaptchaMockSession(bframe_visible=True, solve_after_ticks=None)
