@@ -249,6 +249,29 @@ class AppSettings(_Strict):
     post_errors_to_tms: bool = False
 
 
+def load_env_file(path: str | Path | None = None) -> None:
+    """Load KEY=VALUE pairs from a .env file into os.environ.
+
+    The app reads only os.environ; this makes a local .env work without a wrapper
+    process. Values already in the environment win (override=False), so a
+    deployment's service configuration stays authoritative. Names, not values,
+    are logged. A missing file or a missing python-dotenv install is a no-op.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        logger.debug("python-dotenv not installed; skipping .env file loading")
+        return
+    target = Path(path) if path else Path(".env")
+    if not target.exists():
+        return
+    before = set(os.environ)
+    load_dotenv(dotenv_path=str(target), override=False)
+    newly_set = sorted(set(os.environ) - before)
+    if newly_set:
+        logger.info(".env loaded | file=%s newly_set_keys=%s", target, newly_set)
+
+
 def load_settings(path: str | Path | None = None) -> AppSettings:
     """Load non-carrier settings from environment variables; no external YAML config."""
     backend = BackendSettings(

@@ -38,3 +38,4 @@ app/runtime/
 logs/
 
 .playwright-mcp/
+patches/

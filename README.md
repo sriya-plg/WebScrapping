@@ -42,7 +42,7 @@ python -m app.main run-once --force --carrier SAI001
 
 ## Configure environment
 
-Copy `.env.example` to `.env` and load it into the process environment using your deployment's secret manager or service configuration. The application does not read an external YAML carrier config.
+Copy `.env.example` to `.env`. Both CLI entry points (`app.main`, `app.tools.diagnose`) load a `.env` file from the working directory at startup, without overriding variables that are already in the process environment — so a deployment's service configuration stays authoritative. The application does not read an external YAML carrier config.
 
 Required/commonly used variables:
 

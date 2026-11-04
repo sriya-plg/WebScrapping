@@ -5,6 +5,7 @@ playwright>=1.45
 playwright-stealth>=1.0.6
 patchright>=1.50
 tzdata>=2024.1
+python-dotenv>=1.0
 scrapling[fetchers]~=0.4.15
 pytest>=8
 pytest-asyncio>=0.23

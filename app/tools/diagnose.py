@@ -32,7 +32,7 @@ from app.logging_setup import (
     client_var,
     run_id_var,
 )
-from app.settings import CarrierSpec, load_resolver, load_settings
+from app.settings import CarrierSpec, load_env_file, load_resolver, load_settings
 
 logger = logging.getLogger("app.tools.diagnose")
 
@@ -265,6 +265,8 @@ async def run_diagnose(
 
 
 def main() -> None:
+    # Load a local .env (if present) before any setting is read; existing env values win.
+    load_env_file()
     parser = argparse.ArgumentParser(description="Freight scraper browser and environment diagnostic tool")
     parser.add_argument("--carrier", required=True, help="Carrier code (e.g. FORWARDAIR, SAIA, ESTES)")
     parser.add_argument("--client", default=None, help="Optional client key (e.g. calix)")

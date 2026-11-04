@@ -16,7 +16,7 @@ from app.core.intervention import InterventionQueue
 from app.core.runner import Runner
 from app.core.services import Services
 from app.logging_setup import append_run_output, setup_logging
-from app.settings import load_resolver, load_settings
+from app.settings import load_env_file, load_resolver, load_settings
 
 logger = logging.getLogger("main")
 
@@ -155,6 +155,9 @@ async def _dispatch(args, settings, services, resolver, runner):
 
 
 def main():
+    # Load a local .env (if present) before any setting is read. Existing
+    # environment values win, so deployment service configuration stays authoritative.
+    load_env_file()
     parser = argparse.ArgumentParser(description="Backend-driven freight tracking scraper")
     sub = parser.add_subparsers(dest="cmd", required=True)
     once = sub.add_parser("run-once", help="fetch backend shipments, scrape, and post results")
