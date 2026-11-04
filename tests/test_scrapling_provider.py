@@ -106,6 +106,23 @@ def test_kwargs_map_from_browser_config(tmp_path, monkeypatch):
     assert session2.engine_name == "scrapling"
 
 
+def test_existing_profile_is_reused_and_not_removed(tmp_path, monkeypatch):
+    monkeypatch.setattr(scrapling_provider, "_load_stealthy_session", lambda: FakeEngine)
+    key = "CALIX NETWORKS_SAIA"
+    profile_dir = tmp_path / _safe_name(f"scrapling_{key}")
+    profile_dir.mkdir(parents=True)
+    marker = profile_dir / "profile-marker"
+    marker.write_text("persisted", encoding="utf-8")
+    provider = ScraplingProvider(make_cfg(), str(tmp_path), fallback=FakeFallbackProvider())
+
+    session = asyncio.run(provider.open_session(key))
+
+    assert session.state_reused is True
+    assert FakeEngine.instances[-1].kwargs["user_data_dir"] == str(profile_dir)
+    asyncio.run(provider.close())
+    assert marker.read_text(encoding="utf-8") == "persisted"
+
+
 def test_headless_env_override(tmp_path, monkeypatch):
     monkeypatch.setattr(scrapling_provider, "_load_stealthy_session", lambda: FakeEngine)
     monkeypatch.setenv("BROWSER_HEADLESS", "true")

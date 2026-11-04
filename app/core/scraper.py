@@ -205,10 +205,6 @@ def _tracking_lines(text: str) -> list[str]:
     return [line.strip() for line in text.replace("\r\n", "\n").split("\n") if line.strip()]
 
 
-def _normalize_tracking_text(text: str) -> str:
-    return text.replace("\r\n", "\n").strip()
-
-
 def _safe_url(url: str, secrets: list[str]) -> str:
     parts = urlsplit(url)
     query = [(key, "REDACTED" if re.search(r"password|token|auth|key|secret|cookie|credential|session", key, re.I) else value)
@@ -544,15 +540,13 @@ class BatchScraper:
         chunk: list[TrackingJob],
     ) -> None:
         actual_val = await session.get_value(selector)
-        expected_clean = _normalize_tracking_text(expected_text)
-        actual_clean = _normalize_tracking_text(actual_val or "")
-        if actual_clean == expected_clean:
+        expected_lines = _tracking_lines(expected_text)
+        actual_lines = _tracking_lines(actual_val or "")
+        if actual_lines == expected_lines:
             log(logger, logging.INFO, "tracking input verified",
-                line_count=len(_tracking_lines(actual_clean)), mode="exact")
+                pro_count=len(expected_lines), mode="exact")
             return
 
-        expected_lines = _tracking_lines(expected_clean)
-        actual_lines = _tracking_lines(actual_clean)
         log(logger, logging.WARNING, "tracking input mismatch after entry",
             expected_lines=expected_lines, actual_lines=actual_lines,
             expected_line_count=len(expected_lines), actual_line_count=len(actual_lines))
@@ -561,23 +555,28 @@ class BatchScraper:
         if setter is not None:
             await setter(selector, expected_text)
             actual_val = await session.get_value(selector)
-            actual_clean = _normalize_tracking_text(actual_val or "")
-            if actual_clean == expected_clean:
+            actual_lines = _tracking_lines(actual_val or "")
+            if actual_lines == expected_lines:
                 log(logger, logging.INFO, "tracking input corrected via set_input_value",
-                    line_count=len(_tracking_lines(actual_clean)))
+                    pro_count=len(expected_lines))
                 return
 
-        merged = [line for line in actual_lines if len(_pro_digits(line)) > 12]
-        if merged or (len(actual_lines) < len(expected_lines) and len(actual_lines) <= 2):
-            raise ValueError(
-                "PRO numbers were merged or truncated in the tracking box "
-                f"(expected {len(expected_lines)} lines, got {len(actual_lines)}; merged={merged[:2]})"
-            )
-        if len(actual_lines) == 1 and len(expected_lines) > 1:
-            raise ValueError(
-                "PRO numbers were merged onto one line; multiline entry failed "
-                f"(expected {len(expected_lines)} lines, got 1)"
-            )
+        mismatches = [
+            {
+                "line": index + 1,
+                "expected": expected_lines[index] if index < len(expected_lines) else "<missing>",
+                "actual": actual_lines[index] if index < len(actual_lines) else "<missing>",
+            }
+            for index in range(max(len(expected_lines), len(actual_lines)))
+            if index >= len(expected_lines)
+            or index >= len(actual_lines)
+            or expected_lines[index] != actual_lines[index]
+        ]
+        raise ValueError(
+            "tracking input did not preserve each PRO exactly "
+            f"(expected {len(expected_lines)} PROs, got {len(actual_lines)}; "
+            f"mismatches={mismatches[:3]})"
+        )
 
     async def _open_and_login(self, session: BrowserSession, job: TrackingJob, spec: CarrierSpec, secrets: list[str]) -> None:
         site, config = spec.site, job.carrier

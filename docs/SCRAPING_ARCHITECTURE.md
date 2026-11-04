@@ -56,7 +56,7 @@ The ScraplingProvider falls back to the plain patchright provider (today's produ
 
 ### Per-run outcome logging
 
-Every run logs a `carrier run outcome` line and carries the same fields in the run summary: `started_at`, `engine_requested`, `engine_used` (a silent scrapling→patchright fallback shows up here), `batch_size`, `state_reused`, and `challenge_outcome` (`clean` / `checkbox_auto_passed` / `cloudflare_block` / `image_challenge` / `other_error`, most severe wins). Compare these over several days per engine before making the scrapling engine the profile default.
+Every run logs a `carrier run outcome` line and carries the same fields in the run summary: `started_at`, `engine_requested`, `engine_used` (a silent scrapling→patchright fallback shows up here), `batch_size`, `state_reused`, and `challenge_outcome` (`clean` / `checkbox_auto_passed` / `cloudflare_block` / `image_challenge` / `other_error`, most severe wins). For Scrapling, `state_reused` means its dedicated `user_data_dir` already existed before launch; it does not validate that the profile contains usable cookies. That profile is separate from the Playwright provider's `<client>_<carrier>.json` storage-state file. Compare these fields over several days per engine before making the Scrapling engine the profile default.
 
 CAPTCHA handling is deliberately conservative: the scraper may click the checkbox and wait for an interactive verification when a visible browser is running, but it does not solve image challenges automatically. A challenge that cannot be completed is reported as a carrier-level error and should not be classified as a missing shipment.
 

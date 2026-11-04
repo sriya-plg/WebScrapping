@@ -193,6 +193,27 @@ def test_ambiguous_eleven_digit_pros_fail_loudly_and_are_not_submitted(tmp_path)
     assert len(result.errors) == 2
 
 
+def test_tracking_input_rejects_per_pro_truncation_with_same_line_count(tmp_path):
+    class TruncatedInputSession(FakeSession):
+        async def get_value(self, selector, frame=None):
+            lines = self.input_value.splitlines()
+            lines[0] = lines[0][:-1]
+            return "\n".join(lines)
+
+    session = TruncatedInputSession()
+    spec = make_spec(batch_size=2)
+    jobs = make_jobs(["771375800603", "771375709105"])
+
+    result = run(RecordingProvider(session), spec, jobs, tmp_path)
+
+    assert result.error_type == "ValueError"
+    assert "did not preserve each PRO exactly" in result.error_message
+    assert "'expected': '77137580060'" in result.error_message
+    assert "'actual': '7713758006'" in result.error_message
+    assert session.capture_calls == 0
+    assert session.clicks == 0
+
+
 def test_engine_metadata_flows_into_result(tmp_path):
     entered = "77104331740"
     responses = {entered: [CapturedResponse(
