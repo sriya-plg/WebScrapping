@@ -153,6 +153,7 @@ class ActivityConfig(_Strict):
     events_map: dict[str, str] = Field(default_factory=_default_activity_events_map)
     preserve_event_offsets: bool = False
     preserve_pod_datetime: bool = False
+    pod_datetime_source_only: bool = False  # Do not infer a missing POD time from scrape or delivery status.
 
 
 class MappingConfig(_Strict):
@@ -165,6 +166,8 @@ class MappingConfig(_Strict):
     auto: bool = True
     fields: dict[str, str] = Field(default_factory=dict)  # canonical field -> dotted path ("a.b|c.d" = first non-empty)
     compose: dict[str, str] = Field(default_factory=dict)  # field -> "{path} {path}" template (date+time, city+state)
+    compose_if_missing: list[str] = Field(default_factory=list)  # Keep a direct source value over composition.
+    compose_requires: dict[str, list[str]] = Field(default_factory=dict)  # Required source paths per composed field.
     status_map: dict[str, str] = Field(default_factory=dict)  # carrier status text -> common status
     events: dict[str, Any] | None = None  # {path, fields, compose}
 

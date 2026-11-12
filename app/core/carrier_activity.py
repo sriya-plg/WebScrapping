@@ -87,6 +87,19 @@ def backend_datetime(value: datetime | str | None, *, fallback: datetime | None 
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _backend_actual_pod_datetime(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if "T" not in text:
+        return None
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return backend_datetime(text)
+
+
 _STRING_PAYLOAD_KEYS = {
     "housebill", "proNumber", "carrierCode", "serviceLevel", "mlLog", "mlError",
     "reference", "podName", "mlStartDateTime", "mlEndDateTime", "podDateTime",
@@ -94,12 +107,16 @@ _STRING_PAYLOAD_KEYS = {
 _DATETIME_PAYLOAD_KEYS = {"mlStartDateTime", "mlEndDateTime", "podDateTime"}
 
 
-def _pod_from_result(result: TrackingResult | None) -> tuple[str, str]:
+def _pod_from_result(
+    result: TrackingResult | None,
+    *,
+    source_only: bool = False,
+) -> tuple[str, str]:
     if not result:
         return "", ""
     pod_name = (result.pod_name or "").strip()
     pod_dt = (result.pod_datetime or "").strip()
-    if result.delivered:
+    if result.delivered and not source_only:
         if not pod_dt:
             pod_dt = result.delivery_date or result.scraped_at or ""
         if not pod_name:
@@ -155,6 +172,7 @@ def _activity_ctx(
     ml_log: str,
     ml_error: str,
     preserve_pod_datetime: bool = False,
+    pod_datetime_source_only: bool = False,
 ) -> dict[str, Any]:
     context = JobContext.from_carrier_config(job.carrier)
     bill_to = context.bill_to
@@ -162,7 +180,7 @@ def _activity_ctx(
         bill_to = int(bill_to)
     except (TypeError, ValueError):
         pass
-    pod_name, pod_dt = _pod_from_result(result)
+    pod_name, pod_dt = _pod_from_result(result, source_only=pod_datetime_source_only)
     return {
         "client_id": context.client_id,
         "client_name": context.client_name,
@@ -181,6 +199,7 @@ def _activity_ctx(
         "pod_name": pod_name,
         "pod_datetime": (
             pod_dt if preserve_pod_datetime and pod_dt
+            else pod_dt if pod_datetime_source_only
             else backend_datetime(pod_dt or None, fallback=ml_end)
         ),
         "reference": (result.reference if result else job.search_value) or "",
@@ -211,6 +230,7 @@ def build_add_carrier_activity(
         job, result, ml_start=ml_start, ml_end=ml_end,
         ml_status=ml_status, ml_log=ml_log, ml_error=ml_error,
         preserve_pod_datetime=activity.preserve_pod_datetime,
+        pod_datetime_source_only=activity.pod_datetime_source_only,
     )
     data: dict[str, Any] = dict(ctx)
     if result:
@@ -247,10 +267,15 @@ def build_add_carrier_activity(
         payload["proNumber"] = ctx["pro_number"]
     for key in _STRING_PAYLOAD_KEYS:
         if key in payload and payload[key] is None:
+            if key == "podDateTime" and activity.pod_datetime_source_only:
+                continue
             payload[key] = ""
     for key in _DATETIME_PAYLOAD_KEYS:
         if key in payload:
             if key == "podDateTime" and activity.preserve_pod_datetime:
+                continue
+            if key == "podDateTime" and activity.pod_datetime_source_only:
+                payload[key] = _backend_actual_pod_datetime(payload[key])
                 continue
             payload[key] = backend_datetime(payload[key] or None, fallback=ml_end)
     if "mlLog" in payload:
