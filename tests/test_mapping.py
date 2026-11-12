@@ -360,6 +360,117 @@ def test_estes_status_history_adds_movement_events_and_preserves_offsets():
     assert payload["events"][3]["long"] == 0
 
 
+def test_estes_pickup_only_payload_has_no_pod_datetime_and_keeps_ml_times():
+    raw = {
+        "data": [{
+            "pro": "1848730267",
+            "pickupDate": "2026-11-02",
+            "pickupTime": "12:20:51-06:00",
+            "status": {"conciseStatus": "Departed Pickup Location"},
+        }],
+    }
+    account = CarrierAccount(id=1, carrierName="Estes", carrierCode="ESTE03", billTo="134034")
+    result = normalize(ESTES, raw, "1848730267", "PRO", account)
+    ml_start = datetime(2026, 11, 12, 11, 50, 0, tzinfo=timezone.utc)
+    ml_end = datetime(2026, 11, 12, 11, 58, 12, tzinfo=timezone.utc)
+
+    payload = build_add_carrier_activity(
+        _estes_job(housebill="23696250", pro="184-8730267"), result,
+        outcome="found", summary={}, ml_start=ml_start, ml_end=ml_end,
+        ml_status=3, ml_log="ok", spec=ESTES,
+    )
+
+    assert result.pod_datetime is None
+    assert payload["podDateTime"] is None
+    assert payload["mlStartDateTime"] == "2026-11-12T11:50:00Z"
+    assert payload["mlEndDateTime"] == "2026-11-12T11:58:12Z"
+
+
+def test_estes_delivery_date_and_time_populate_pod_datetime():
+    raw = {
+        "data": [{
+            "pro": "1848730267",
+            "deliveryDate": "2026-11-04",
+            "deliveryTime": "09:15:30",
+            "status": {"expandedStatus": "Delivery Completed - OK"},
+        }],
+    }
+    account = CarrierAccount(id=1, carrierName="Estes", carrierCode="ESTE03", billTo="134034")
+    result = normalize(ESTES, raw, "1848730267", "PRO", account)
+    payload = build_add_carrier_activity(
+        _estes_job(housebill="23696250", pro="184-8730267"), result,
+        outcome="found", summary={}, ml_start=START, ml_end=END,
+        ml_status=3, ml_log="ok", spec=ESTES,
+    )
+
+    assert result.pod_datetime == "2026-11-04T09:15:30"
+    assert payload["podDateTime"] == "2026-11-04T09:15:30Z"
+
+
+def test_estes_delivery_date_without_delivery_time_is_not_a_pod_timestamp():
+    raw = {"data": [{"pro": "1848730267", "deliveryDate": "2026-11-04"}]}
+    account = CarrierAccount(id=1, carrierName="Estes", carrierCode="ESTE03", billTo="134034")
+    result = normalize(ESTES, raw, "1848730267", "PRO", account)
+    payload = build_add_carrier_activity(
+        _estes_job(housebill="23696250", pro="184-8730267"), result,
+        outcome="found", summary={}, ml_start=START, ml_end=END,
+        ml_status=3, ml_log="ok", spec=ESTES,
+    )
+
+    assert result.pod_datetime is None
+    assert payload["podDateTime"] is None
+
+
+def test_estes_pod_datetime_source_wins_over_composed_delivery_time():
+    raw = {
+        "data": [{
+            "pro": "1848730267",
+            "podDateTime": "2026-11-04T08:30:00-06:00",
+            "deliveryDate": "2026-11-05",
+            "deliveryTime": "09:15:30-06:00",
+        }],
+    }
+    account = CarrierAccount(id=1, carrierName="Estes", carrierCode="ESTE03", billTo="134034")
+    result = normalize(ESTES, raw, "1848730267", "PRO", account)
+    payload = build_add_carrier_activity(
+        _estes_job(housebill="23696250", pro="184-8730267"), result,
+        outcome="found", summary={}, ml_start=START, ml_end=END,
+        ml_status=3, ml_log="ok", spec=ESTES,
+    )
+
+    assert result.pod_datetime == "2026-11-04T08:30:00-06:00"
+    assert payload["podDateTime"] == "2026-11-04T14:30:00Z"
+
+
+def test_estes_delivered_without_pod_datetime_does_not_use_scrape_or_event_time():
+    raw = {
+        "data": [{
+            "pro": "1848730267",
+            "status": {"expandedStatus": "Delivery Completed - OK"},
+            "movementHistory": [{
+                "id": "Pickup",
+                "description": "Actual Pickup",
+                "statusHistory": [{
+                    "expandedStatus": "Pickup Location Serviced",
+                    "referenceDate": "2026-11-02",
+                    "referenceTime": "12:20:51-06:00",
+                }],
+            }],
+        }],
+    }
+    account = CarrierAccount(id=1, carrierName="Estes", carrierCode="ESTE03", billTo="134034")
+    result = normalize(ESTES, raw, "1848730267", "PRO", account)
+    payload = build_add_carrier_activity(
+        _estes_job(housebill="23696250", pro="184-8730267"), result,
+        outcome="found", summary={}, ml_start=START, ml_end=END,
+        ml_status=3, ml_log="ok", spec=ESTES,
+    )
+
+    assert result.delivered
+    assert result.pod_datetime is None
+    assert payload["podDateTime"] is None
+
+
 def _forwardair_job(housebill="23600001", pro="96765557") -> TrackingJob:
     config = CarrierConfig(
         id=1, carrierName="Forward Air", carrierCode="FORW-LTL",

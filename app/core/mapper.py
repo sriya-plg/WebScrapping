@@ -421,6 +421,10 @@ def normalize(spec: CarrierSpec, raw: dict, ref: str, ref_type: str, account: Ca
     m, notes = spec.mapping, []
     vals: dict[str, Any] = {f: get_path(raw, p) for f, p in m.fields.items()}
     for field, template in (m.compose or {}).items():
+        if field in m.compose_if_missing and vals.get(field) not in (None, ""):
+            continue
+        if any(get_path(raw, path) in (None, "") for path in m.compose_requires.get(field, [])):
+            continue
         composed = compose_value(raw, template)
         if composed not in (None, ""):
             vals[field] = composed
